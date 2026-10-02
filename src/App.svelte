@@ -8,6 +8,7 @@
   import SettingsView from './components/SettingsView.svelte';
   import CommandPalette from './components/CommandPalette.svelte';
   import InstallBanner from './components/InstallBanner.svelte';
+  import SignInFlow from './components/SignInFlow.svelte';
 
   import {
     listActiveNotes,
@@ -18,15 +19,47 @@
     restoreNote,
     purgeNote,
     emptyTrash,
+    wipeAll,
+    onNoteSaved,
   } from './lib/db.js';
 
   import { createNote } from './lib/notes.js';
   import { prefs, setPref, watchSystemTheme } from './lib/prefs.js';
 
+  import {
+    initAuth,
+    authUser,
+    completeEmailLinkSignIn,
+    signOutNow,
+  } from './lib/auth.js';
+
+  import {
+    syncKey,
+    clearSyncKey,
+    setBiometricAvailable,
+    setSyncKey,
+  } from './lib/sync-key.js';
+
+  import {
+    hasStoredKey,
+    unlockWithBiometric,
+  } from './lib/key-vault.js';
+
+  import {
+    syncStatus,
+    runFullSync,
+    queueNotePush,
+    startPeriodicSync,
+    stopPeriodicSync,
+    handleOnline,
+    handleOffline,
+    resetSyncState,
+  } from './lib/sync-store.js';
+
   // ═══════════════════════════════════════════════════════════
   // STATE
   // ═══════════════════════════════════════════════════════════
-  let view = 'list';             // 'list' | 'edit' | 'trash' | 'settings'
+  let view = 'list';
   let notes = [];
   let trashNotes = [];
   let trashCount = 0;
@@ -35,27 +68,74 @@
   let currentNote = null;
   let kindPickerOpen = false;
   let commandPaletteOpen = false;
+  let showSignInFlow = false;
 
   let untagSystemTheme = null;
+  let unsubscribeSave = null;
+  let unsubscribeSyncKey = null;
+  let initialSyncRan = false;
 
   // ═══════════════════════════════════════════════════════════
   // BOOT
   // ═══════════════════════════════════════════════════════════
   onMount(async () => {
     untagSystemTheme = watchSystemTheme();
+    initAuth();
+
+    await completeEmailLinkSignIn().catch((err) => {
+      console.warn('[auth] email link completion failed:', err);
+    });
+
     await refreshList();
 
-    // Handle Android share-target payload first (has priority over shortcuts)
+    // When a note is saved locally, queue a sync push.
+    unsubscribeSave = onNoteSaved((note) => {
+      queueNotePush(note.id);
+    });
+
+    // When the key unlocks, run an initial sync (once).
+    unsubscribeSyncKey = syncKey.subscribe((s) => {
+      if (!s.locked && s.key && $authUser && !initialSyncRan) {
+        initialSyncRan = true;
+        runFullSync().catch((err) => {
+          console.warn('[sync] initial sync failed:', err);
+        });
+      }
+      if (s.locked) {
+        initialSyncRan = false;
+      }
+    });
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    startPeriodicSync();
+
     const shared = await handleSharePayload();
     if (shared) return;
 
-    // Handle PWA shortcuts (?action=new-doc, ?action=new-todo)
     await handleShortcutAction();
   });
 
   onDestroy(() => {
     if (untagSystemTheme) untagSystemTheme();
+    if (unsubscribeSave) unsubscribeSave();
+    if (unsubscribeSyncKey) unsubscribeSyncKey();
+    stopPeriodicSync();
+    window.removeEventListener('online', handleOnline);
+    window.removeEventListener('offline', handleOffline);
   });
+
+  // ═══════════════════════════════════════════════════════════
+  // REACTIVE: biometric availability
+  // ═══════════════════════════════════════════════════════════
+  $: if ($authUser && $authUser.uid) {
+    hasStoredKey($authUser.uid)
+      .then((has) => setBiometricAvailable(has))
+      .catch(() => setBiometricAvailable(false));
+  } else {
+    setBiometricAvailable(false);
+  }
 
   // ═══════════════════════════════════════════════════════════
   // GLOBAL SHORTCUTS
@@ -64,23 +144,18 @@
     const meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
 
-    // Cmd/Ctrl + K → command palette
     if (e.key.toLowerCase() === 'k' && !e.shiftKey) {
       e.preventDefault();
       commandPaletteOpen = true;
       return;
     }
 
-    // Cmd/Ctrl + , → settings
     if (e.key === ',') {
       e.preventDefault();
-      if (view !== 'settings') {
-        view = 'settings';
-      }
+      if (view !== 'settings') view = 'settings';
       return;
     }
 
-    // Cmd/Ctrl + Shift + T → trash
     if (e.key.toLowerCase() === 't' && e.shiftKey) {
       e.preventDefault();
       openTrash();
@@ -94,7 +169,6 @@
     loading = true;
     try {
       notes = await listActiveNotes();
-      // Trash count drives the pill in the header
       const trashed = await listTrashNotes();
       trashCount = trashed.length;
     } catch (err) {
@@ -121,14 +195,8 @@
   }
 
   // ═══════════════════════════════════════════════════════════
-  // SHARE TARGET + SHORTCUT ACTIONS
+  // SHARE + SHORTCUTS
   // ═══════════════════════════════════════════════════════════
-  /**
-   * Android share target. Payload arrives as:
-   *   /?title=...&text=...&url=...
-   * We build a doc note from it and open the editor.
-   * Returns true if a note was created.
-   */
   async function handleSharePayload() {
     const params = new URLSearchParams(window.location.search);
     const title = params.get('title') || '';
@@ -151,8 +219,6 @@
       await putNote(fresh);
       currentNote = fresh;
       view = 'edit';
-
-      // Clean the URL so a refresh doesn't re-trigger
       window.history.replaceState({}, '', '/');
       return true;
     } catch (err) {
@@ -161,10 +227,6 @@
     }
   }
 
-  /**
-   * PWA shortcut handlers. Long-pressing the installed icon on Android
-   * offers "New note" and "New to-do" — these arrive as ?action=...
-   */
   async function handleShortcutAction() {
     const params = new URLSearchParams(window.location.search);
     const action = params.get('action');
@@ -172,11 +234,8 @@
 
     window.history.replaceState({}, '', '/');
 
-    if (action === 'new-doc') {
-      await createOfKind('doc');
-    } else if (action === 'new-todo') {
-      await createOfKind('list', 'todo');
-    }
+    if (action === 'new-doc') await createOfKind('doc');
+    else if (action === 'new-todo') await createOfKind('list', 'todo');
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -212,9 +271,10 @@
     await refreshList();
   }
 
-  function handleSaved() {
-    // The editor mutates the note object in place, so the list will
-    // pick up the change on the next refresh (which happens on back).
+  function handleSaved() {}
+
+  async function handleImported() {
+    await refreshList();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -262,7 +322,68 @@
   }
 
   // ═══════════════════════════════════════════════════════════
-  // VIEW BACK HANDLERS
+  // SYNC HANDLERS
+  // ═══════════════════════════════════════════════════════════
+  function handleOpenSync() {
+    showSignInFlow = true;
+  }
+
+  async function handleSyncNow() {
+    try {
+      await runFullSync();
+      await refreshList();
+    } catch (err) {
+      console.error('[sync] manual sync failed:', err);
+    }
+  }
+
+  async function handleBiometricUnlock() {
+    if (!$authUser) return;
+    const key = await unlockWithBiometric($authUser.uid);
+    if (!key) return;
+
+    try {
+      const { doc, getDoc } = await import('firebase/firestore');
+      const { db: firestore } = await import('./lib/firebase.js');
+      const snap = await getDoc(doc(firestore, 'users', $authUser.uid));
+      const data = snap.data();
+      setSyncKey({ key, salt: data?.salt || null });
+    } catch (err) {
+      console.error('[sync] biometric unlock failed:', err);
+    }
+  }
+
+  async function handleSignOut() {
+    clearSyncKey();
+    resetSyncState();
+    initialSyncRan = false;
+    await signOutNow();
+  }
+
+  async function handleSignOutClear() {
+    const ok = confirm(
+      'This removes all notes from this device. ' +
+      'Anything not yet synced will be lost. Continue?'
+    );
+    if (!ok) return;
+
+    try {
+      await wipeAll();
+      clearSyncKey();
+      resetSyncState();
+      initialSyncRan = false;
+      await signOutNow();
+      currentNote = null;
+      view = 'list';
+      await refreshList();
+    } catch (err) {
+      console.error('[sign out clear] failed:', err);
+      alert('Something went wrong clearing local data.');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // BACK HANDLERS
   // ═══════════════════════════════════════════════════════════
   async function settingsBack() {
     view = 'list';
@@ -310,6 +431,12 @@
         <SettingsView
           on:back={settingsBack}
           on:open-trash={openTrash}
+          on:imported={handleImported}
+          on:open-sync={handleOpenSync}
+          on:sync-now={handleSyncNow}
+          on:unlock-biometric={handleBiometricUnlock}
+          on:sign-out={handleSignOut}
+          on:sign-out-clear={handleSignOutClear}
         />
       {/if}
     </div>
@@ -386,6 +513,14 @@
     />
   {/if}
 
+  <!-- ══════════════ SIGN-IN FLOW ══════════════ -->
+  {#if showSignInFlow}
+    <SignInFlow
+      on:complete={() => (showSignInFlow = false)}
+      on:close={() => (showSignInFlow = false)}
+    />
+  {/if}
+
   <!-- ══════════════ INSTALL BANNER ══════════════ -->
   <InstallBanner />
 </div>
@@ -400,7 +535,6 @@
     transition: background-color .25s var(--ease), color .25s var(--ease);
   }
 
-  /* ══════════════ KIND PICKER ══════════════ */
   .overlay {
     position: fixed;
     inset: 0;

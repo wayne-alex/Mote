@@ -7,17 +7,47 @@
       content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
     />
 
-    <meta name="theme-color" content="#F7F7F5" />
-    <meta name="mobile-web-app-capable" content="yes" />
+    <!-- ── PWA meta ──────────────────────────────────────── -->
+    <meta name="theme-color" content="#fafaf8" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0d0d0e" media="(prefers-color-scheme: dark)" />
+    <meta name="description" content="A quiet place for thoughts. Everything stays on your device." />
+
+    <!-- ── iOS PWA ───────────────────────────────────────── -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Mote" />
 
+    <!-- ── Icons ─────────────────────────────────────────── -->
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="mask-icon" href="/icon.svg" color="#4c7128" />
+
+    <!-- iOS splash screens — one per common device -->
+    <link
+      rel="apple-touch-startup-image"
+      href="/splash/splash-1170x2532.png"
+      media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3)"
+    />
+    <link
+      rel="apple-touch-startup-image"
+      href="/splash/splash-1284x2778.png"
+      media="(device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3)"
+    />
+    <link
+      rel="apple-touch-startup-image"
+      href="/splash/splash-1536x2048.png"
+      media="(device-width: 768px) and (device-height: 1024px) and (-webkit-device-pixel-ratio: 2)"
+    />
+
+    <!-- Manifest — VitePWA injects this link in dev, but explicit works too -->
+    <link rel="manifest" href="/manifest.webmanifest" />
 
     <title>Mote</title>
 
+    <!-- ── Fonts ─────────────────────────────────────────── -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

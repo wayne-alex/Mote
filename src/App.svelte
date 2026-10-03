@@ -27,7 +27,7 @@
   import { createNote } from './lib/notes.js';
   import { prefs, setPref, watchSystemTheme } from './lib/prefs.js';
 
-   import {
+  import {
     initAuth,
     authUser,
     completeEmailLinkSignIn,
@@ -63,6 +63,8 @@
     getSharedTokenFromPath,
   } from './lib/shared.js';
 
+  const SIGNIN_PENDING_KEY = 'mote:signinPending';
+
   // ═══════════════════════════════════════════════════════════
   // STATE
   // ═══════════════════════════════════════════════════════════
@@ -77,9 +79,7 @@
   let commandPaletteOpen = false;
   let showSignInFlow = false;
 
-  // Shared list routing — populated at boot from the URL, or by
-  // the "New shared list" flow. When non-null, the shared view
-  // takes over the entire screen.
+  // Shared list routing
   let activeSharedToken = null;
   let newSharedKindPickerOpen = false;
 
@@ -91,14 +91,13 @@
   // ═══════════════════════════════════════════════════════════
   // BOOT
   // ═══════════════════════════════════════════════════════════
-    onMount(async () => {
+  onMount(async () => {
     untagSystemTheme = watchSystemTheme();
     initAuth();
 
-    // Both sign-in methods can return the user to this URL:
-    //  - Email link lands on whatever URL was in the email
-    //  - Google redirect lands on whatever URL the user came from
-    // We try both — only one will match, the other returns null.
+    // ── Process any pending sign-in returns ──────────────────
+    // Email link (from an email) and Google redirect (from OAuth)
+    // are handled in parallel. Only one applies per page load.
     await Promise.all([
       completeEmailLinkSignIn().catch((err) => {
         console.warn('[auth] email link completion failed:', err);
@@ -108,21 +107,29 @@
       }),
     ]);
 
-    // Check if the URL is a shared-list link
-    activeSharedToken = getSharedTokenFromPath();
-    if (activeSharedToken) {
-      // We're rendering a shared list — no need for personal notes to load,
-      // but boot auth + sync anyway so the user can navigate home.
+    // Give onAuthStateChanged a tick to fire so $authUser is settled
+    await new Promise((r) => setTimeout(r, 100));
+
+    // ── Recover mid-sign-in state across the redirect ────────
+    // If we set the "signin pending" flag before the redirect,
+    // reopen the flow now that we're back.
+    const wasSigningIn = localStorage.getItem(SIGNIN_PENDING_KEY) === '1';
+    if (wasSigningIn) {
+      localStorage.removeItem(SIGNIN_PENDING_KEY);
+      await recoverSignInFlow();
     }
 
+    // ── Shared list route check ──────────────────────────────
+    activeSharedToken = getSharedTokenFromPath();
+
+    // ── Load personal data ───────────────────────────────────
     await refreshList();
 
-    // When a note is saved locally, queue a sync push.
+    // ── Sync wiring ──────────────────────────────────────────
     unsubscribeSave = onNoteSaved((note) => {
       queueNotePush(note.id);
     });
 
-    // When the key unlocks, run an initial sync (once).
     unsubscribeSyncKey = syncKey.subscribe((s) => {
       if (!s.locked && s.key && $authUser && !initialSyncRan) {
         initialSyncRan = true;
@@ -137,17 +144,15 @@
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    window.addEventListener('popstate', onPopState);
 
     startPeriodicSync();
 
-    // Personal note share target (personal notes only — see manifest)
+    // ── PWA share target + shortcut actions ──────────────────
     const shared = await handleSharePayload();
     if (shared) return;
 
     await handleShortcutAction();
-
-    // Handle browser back button to /s/:token
-    window.addEventListener('popstate', onPopState);
   });
 
   onDestroy(() => {
@@ -161,10 +166,38 @@
   });
 
   function onPopState() {
-    // If the user navigates back to /s/:token, open that list.
-    // If they navigate back to /, close the shared view.
-    const token = getSharedTokenFromPath();
-    activeSharedToken = token;
+    activeSharedToken = getSharedTokenFromPath();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // RECOVER FROM A SIGN-IN REDIRECT
+  // ═══════════════════════════════════════════════════════════
+  async function recoverSignInFlow() {
+    if (!$authUser) {
+      // Redirect didn't complete — reopen the flow so the user
+      // can try again with visible error feedback.
+      showSignInFlow = true;
+      return;
+    }
+
+    // We're signed in. Decide whether onboarding is complete.
+    try {
+      const { doc, getDoc } = await import('firebase/firestore');
+      const { db: firestore } = await import('./lib/firebase.js');
+      const snap = await getDoc(doc(firestore, 'users', $authUser.uid));
+      const profile = snap.data();
+
+      if (!snap.exists() || !profile?.verifier) {
+        // Onboarding unfinished — reopen flow; SignInFlow will
+        // resolve to the setup-phrase or enter-phrase screen.
+        showSignInFlow = true;
+      }
+      // If onboarding is complete, nothing to do — user is signed
+      // in and sync will run once the vault unlocks.
+    } catch (err) {
+      console.error('[auth] recover sign-in failed:', err);
+      showSignInFlow = true;
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -182,7 +215,6 @@
   // GLOBAL SHORTCUTS
   // ═══════════════════════════════════════════════════════════
   function onGlobalKeydown(e) {
-    // Don't fire shortcuts while a shared list is open — it has its own UI
     if (activeSharedToken) return;
 
     const meta = e.metaKey || e.ctrlKey;
@@ -239,7 +271,7 @@
   }
 
   // ═══════════════════════════════════════════════════════════
-  // SHARE TARGET + SHORTCUTS (personal notes only)
+  // SHARE TARGET + SHORTCUTS
   // ═══════════════════════════════════════════════════════════
   async function handleSharePayload() {
     const params = new URLSearchParams(window.location.search);
@@ -315,10 +347,7 @@
     await refreshList();
   }
 
-  function handleSaved() {
-    // No-op — the editor mutates the note object in place and
-    // the sync listener pushes changes automatically.
-  }
+  function handleSaved() {}
 
   async function handleImported() {
     await refreshList();
@@ -334,8 +363,6 @@
 
   function handleNewShared() {
     if (!$authUser) {
-      // Prompt sign-in first — shared lists need an identity for
-      // the members list.
       showSignInFlow = true;
       return;
     }
@@ -484,7 +511,6 @@
 <div class="mote">
 
   {#if activeSharedToken}
-    <!-- ══════════════ SHARED LIST VIEW ══════════════ -->
     <SharedListView
       token={activeSharedToken}
       on:back={closeShared}
@@ -539,6 +565,7 @@
     <!-- ══════════════ PERSONAL NOTE KIND PICKER ══════════════ -->
     {#if kindPickerOpen}
       <div class="overlay" on:click={() => (kindPickerOpen = false)} on:keydown role="presentation">
+        <!-- svelte-ignore a11y_interactive_supports_focus -->
         <div class="sheet" on:click|stopPropagation on:keydown role="dialog" aria-modal="true">
           <div class="grabber"></div>
           <h3 class="sheet-title">What kind of note?</h3>
@@ -601,6 +628,7 @@
     <!-- ══════════════ NEW SHARED LIST KIND PICKER ══════════════ -->
     {#if newSharedKindPickerOpen}
       <div class="overlay" on:click={() => (newSharedKindPickerOpen = false)} on:keydown role="presentation">
+        <!-- svelte-ignore a11y_interactive_supports_focus -->
         <div class="sheet" on:click|stopPropagation on:keydown role="dialog" aria-modal="true">
           <div class="grabber"></div>
           <h3 class="sheet-title">New shared list</h3>
@@ -708,7 +736,6 @@
     transition: background-color .25s var(--ease), color .25s var(--ease);
   }
 
-  /* ══════════════ KIND PICKER ══════════════ */
   .overlay {
     position: fixed;
     inset: 0;

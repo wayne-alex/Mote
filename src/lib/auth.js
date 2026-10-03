@@ -67,16 +67,15 @@ export async function signInWithGoogle() {
      window.location.hostname === '127.0.0.1');
 
   if (isLocalhost) {
-    // Dev: try popup, fall back to redirect if blocked
     try {
       const result = await signInWithPopup(auth, provider);
       return result.user;
     } catch (err) {
       if (err?.code === 'auth/popup-blocked' ||
           err?.code === 'auth/popup-closed-by-user') {
-        console.warn('[auth] popup blocked in dev, falling back to redirect');
+        localStorage.setItem('mote:signinPending', '1');
         await signInWithRedirect(auth, provider);
-        return null;   // page will reload
+        return null;
       }
       console.error('[auth] google sign-in failed:', err);
       authError.set(friendlyError(err));
@@ -86,9 +85,11 @@ export async function signInWithGoogle() {
 
   // Production: always use redirect
   try {
+    localStorage.setItem('mote:signinPending', '1');
     await signInWithRedirect(auth, provider);
-    return null;   // page will reload; getRedirectResult() picks it up
+    return null;
   } catch (err) {
+    localStorage.removeItem('mote:signinPending');
     console.error('[auth] google redirect failed:', err);
     authError.set(friendlyError(err));
     throw err;

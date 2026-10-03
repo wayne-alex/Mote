@@ -1,5 +1,5 @@
 <script>
-  import { createEventDispatcher, onMount, tick } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy, tick } from 'svelte';
   import { putNote } from '../lib/db.js';
   import {
     createListItem,
@@ -39,6 +39,26 @@
   let tagInputValue = '';
   let tagInputEl = null;
 
+  // Viewport / keyboard (keeps the footer above the on-screen keyboard)
+  let vvHeight = 0;
+  let vvTop = 0;
+  let keyboardOpen = false;
+
+  // ═══════════════════════════════════════════════════════════
+  // VIEWPORT
+  // ═══════════════════════════════════════════════════════════
+  function syncViewport() {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    vvHeight = vv.height;
+    vvTop = vv.offsetTop;
+    keyboardOpen = window.innerHeight - vv.height > 120;
+  }
+
+  $: appStyle = vvHeight
+    ? `top:${vvTop}px;height:${vvHeight}px;bottom:auto;`
+    : '';
+
   // ═══════════════════════════════════════════════════════════
   // PREVIEW PERSISTENCE
   // ═══════════════════════════════════════════════════════════
@@ -70,11 +90,28 @@
   // ═══════════════════════════════════════════════════════════
   // BOOT + NOTE SWAP
   // ═══════════════════════════════════════════════════════════
-  onMount(async () => {
-    if (!note) return;
-    hydrateFromNote();
-    await tick();
-    textareaEl?.focus();
+  onMount(() => {
+    syncViewport();
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', syncViewport);
+    vv?.addEventListener('scroll', syncViewport);
+
+    (async () => {
+      if (!note) return;
+      hydrateFromNote();
+      await tick();
+      textareaEl?.focus();
+    })();
+
+    return () => {
+      vv?.removeEventListener('resize', syncViewport);
+      vv?.removeEventListener('scroll', syncViewport);
+    };
+  });
+
+  onDestroy(() => {
+    flushSave();
+    if (statusTimer) clearTimeout(statusTimer);
   });
 
   $: if (note && note.id !== currentNoteId) {
@@ -102,6 +139,7 @@
   }
 
   async function doSave() {
+    saveTimer = null;
     if (!note) return;
     try {
       const patch = note.kind === 'list'
@@ -125,6 +163,19 @@
     }
   }
 
+  // Write any pending edit immediately (back button, app backgrounded, unmount).
+  async function flushSave() {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      await doSave();
+    }
+  }
+
+  function onVisibility() {
+    if (document.visibilityState === 'hidden') flushSave();
+  }
+
   function deriveListTitle() {
     const first = items.map((i) => i.text).find((t) => t && t.trim());
     return first ? first.slice(0, 80) : '';
@@ -144,6 +195,8 @@
     setPreviewFor(note.id, previewing);
     if (!previewing) {
       tick().then(() => textareaEl?.focus());
+    } else if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur(); // drop the keyboard when previewing
     }
   }
 
@@ -169,6 +222,7 @@
   }
 
   function toggleItem(id) {
+    if (navigator.vibrate) navigator.vibrate(8);
     items = items.map((it) =>
       it.id === id
         ? { ...it, done: !it.done, doneAt: !it.done ? new Date().toISOString() : null }
@@ -279,7 +333,8 @@
   $: previewHtml = previewing ? renderMarkdown(body) : '';
   $: canPreview = note?.kind === 'doc' && body.trim().length > 0;
 
-  function back() {
+  async function back() {
+    await flushSave();
     dispatch('back');
   }
 
@@ -293,14 +348,16 @@
   }
 </script>
 
-<svelte:window on:keydown={onKeydown} />
+<svelte:window on:keydown={onKeydown} on:pagehide={flushSave} />
+<svelte:document on:visibilitychange={onVisibility} />
 
-<div class="editor-screen">
+<!-- App shell: locked to the visible screen (shrinks above the keyboard). -->
+<div class="app" style={appStyle}>
 
   <!-- ══════════════ HEADER ══════════════ -->
   <header class="head">
     <button class="back-btn" on:click={back} aria-label="Back">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M15 6 L9 12 L15 18"/>
       </svg>
@@ -315,32 +372,6 @@
     </div>
 
     <div class="head-right">
-      {#if note?.kind === 'doc'}
-        <button
-          class="preview-btn"
-          class:active={previewing}
-          disabled={!canPreview}
-          on:click={togglePreview}
-          aria-label={previewing ? 'Edit' : 'Preview'}
-        >
-          {#if previewing}
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
-                 stroke="currentColor" stroke-width="2"
-                 stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 20 H20"/>
-              <path d="M16.5 3.5 A2.1 2.1 0 0 1 20.5 7.5 L7 21 H3 V17 Z"/>
-            </svg>
-          {:else}
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
-                 stroke="currentColor" stroke-width="2"
-                 stroke-linecap="round" stroke-linejoin="round">
-              <path d="M2 12 C4.5 7 8 4.5 12 4.5 C16 4.5 19.5 7 22 12 C19.5 17 16 19.5 12 19.5 C8 19.5 4.5 17 2 12 Z"/>
-              <circle cx="12" cy="12" r="3"/>
-            </svg>
-          {/if}
-        </button>
-      {/if}
-
       <div class="status-slot">
         {#if status === 'saving'}
           <span class="status saving">Saving…</span>
@@ -350,6 +381,32 @@
           <span class="status error">Save failed</span>
         {/if}
       </div>
+
+      {#if note?.kind === 'doc'}
+        <button
+          class="preview-btn"
+          class:active={previewing}
+          disabled={!canPreview}
+          on:click={togglePreview}
+          aria-label={previewing ? 'Edit' : 'Preview'}
+        >
+          {#if previewing}
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+                 stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 20 H20"/>
+              <path d="M16.5 3.5 A2.1 2.1 0 0 1 20.5 7.5 L7 21 H3 V17 Z"/>
+            </svg>
+          {:else}
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+                 stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 12 C4.5 7 8 4.5 12 4.5 C16 4.5 19.5 7 22 12 C19.5 17 16 19.5 12 19.5 C8 19.5 4.5 17 2 12 Z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          {/if}
+        </button>
+      {/if}
     </div>
   </header>
 
@@ -373,7 +430,9 @@
             class="tag-input"
             placeholder="tag name"
             autocomplete="off"
+            autocapitalize="off"
             spellcheck="false"
+            enterkeyhint="done"
             maxlength="32"
           />
         {:else}
@@ -400,7 +459,9 @@
         on:input={onTitleInput}
         placeholder="List name"
         autocomplete="off"
+        autocapitalize="sentences"
         spellcheck="false"
+        enterkeyhint="next"
       />
 
       <div class="list-meta">
@@ -434,7 +495,9 @@
               on:keydown={(e) => onItemKeydown(e, item.id)}
               placeholder="New item"
               autocomplete="off"
+              autocapitalize="sentences"
               spellcheck="false"
+              enterkeyhint="next"
             />
 
             <button
@@ -471,14 +534,14 @@
       </article>
     </div>
 
-    <footer class="foot">
+    <footer class="foot" class:kb={keyboardOpen}>
       <div class="stats">
         <span>{words} {words === 1 ? 'word' : 'words'}</span>
         <span class="sep">·</span>
         <span>{chars} {chars === 1 ? 'char' : 'chars'}</span>
       </div>
       <div class="mode-hint">
-        Preview · <kbd>⌘P</kbd> to edit
+        Preview<span class="kbd-hint"> · <kbd>⌘P</kbd> to edit</span>
       </div>
     </footer>
 
@@ -491,11 +554,12 @@
         class="editor"
         placeholder="Start typing… Markdown is supported."
         spellcheck="true"
+        autocapitalize="sentences"
         on:input={onBodyInput}
       ></textarea>
     </div>
 
-    <footer class="foot">
+    <footer class="foot" class:kb={keyboardOpen}>
       <div class="stats">
         <span>{words} {words === 1 ? 'word' : 'words'}</span>
         <span class="sep">·</span>
@@ -503,7 +567,7 @@
       </div>
       {#if hasMarkdownSyntax(body)}
         <div class="mode-hint">
-          Markdown · <kbd>⌘P</kbd> to preview
+          Markdown<span class="kbd-hint"> · <kbd>⌘P</kbd> to preview</span>
         </div>
       {/if}
     </footer>
@@ -512,51 +576,64 @@
 </div>
 
 <style>
-  .editor-screen {
+  /* ══════════════ APP SHELL ══════════════ */
+  /* No transform/animation on .app. The inline style (top/height) tracks
+     the visual viewport so the footer rides above the on-screen keyboard. */
+  .app {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
     width: min(100%, 720px);
     margin: 0 auto;
-    min-height: 100vh;
-    min-height: 100dvh;
     display: flex;
     flex-direction: column;
-    animation: fadeUp .3s var(--ease) both;
+    overflow: hidden;
     background: var(--paper);
     color: var(--ink);
+    -webkit-tap-highlight-color: transparent;
     transition: background-color .25s var(--ease), color .25s var(--ease);
   }
 
   /* ══════════════ HEADER ══════════════ */
   .head {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    padding: 14px 16px;
+    padding: calc(8px + env(safe-area-inset-top)) 12px 8px;
     border-bottom: 1px solid var(--hairline);
-    flex-shrink: 0;
+    background: var(--paper);
+    -webkit-touch-callout: none;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .back-btn {
-    width: 34px;
-    height: 34px;
+    width: 44px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
     border: none;
-    border-radius: 10px;
+    border-radius: 12px;
     background: transparent;
     color: var(--ink);
     cursor: pointer;
     flex-shrink: 0;
+    touch-action: manipulation;
     transition: background .15s var(--ease), transform .15s var(--ease);
   }
-  .back-btn:hover { background: var(--paper-2); }
-  .back-btn:active { transform: scale(.94); }
+  .back-btn:active { background: var(--paper-2); transform: scale(.94); }
 
   .head-center {
+    flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
+    min-width: 0;
   }
 
   .kind-badge {
@@ -574,40 +651,35 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 8px;
-    min-width: 34px;
+    gap: 4px;
+    min-width: 44px;
+    flex-shrink: 0;
   }
 
   .preview-btn {
-    width: 32px;
-    height: 32px;
+    width: 44px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
     border: none;
-    border-radius: 9px;
+    border-radius: 12px;
     background: transparent;
     color: var(--ink-2);
     cursor: pointer;
     flex-shrink: 0;
+    touch-action: manipulation;
     transition: background .15s var(--ease), color .15s var(--ease), transform .15s var(--ease);
   }
-  .preview-btn:hover:not(:disabled) { background: var(--paper-2); }
-  .preview-btn:active:not(:disabled) { transform: scale(.94); }
-  .preview-btn.active {
-    background: var(--ink);
-    color: var(--paper);
-  }
-  .preview-btn:disabled {
-    opacity: .3;
-    cursor: not-allowed;
-  }
+  .preview-btn:active:not(:disabled) { background: var(--paper-2); transform: scale(.94); }
+  .preview-btn.active { background: var(--ink); color: var(--paper); }
+  .preview-btn:disabled { opacity: .3; cursor: not-allowed; }
 
   .status-slot {
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    min-width: 60px;
+    min-width: 56px;
   }
 
   .status {
@@ -621,11 +693,16 @@
   .status.saved { color: var(--accent); }
   .status.error { color: var(--danger); font-weight: 600; }
 
+  @media (hover: hover) {
+    .back-btn:hover { background: var(--paper-2); }
+    .preview-btn:hover:not(:disabled):not(.active) { background: var(--paper-2); }
+  }
+
   /* ══════════════ TAGS BAR ══════════════ */
   .tags-bar {
+    flex: 0 0 auto;
     padding: 8px 16px;
     border-bottom: 1px solid var(--hairline);
-    flex-shrink: 0;
     background: var(--paper-2);
   }
 
@@ -638,6 +715,7 @@
     padding: 2px 0 4px;
     scrollbar-width: none;
     -ms-overflow-style: none;
+    -webkit-overflow-scrolling: touch;
   }
   .tags-scroll::-webkit-scrollbar { display: none; }
 
@@ -646,7 +724,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 5px 10px;
+    padding: 6px 11px;
     border: 1px solid transparent;
     border-radius: 999px;
     background: var(--accent-soft);
@@ -656,10 +734,10 @@
     font-weight: 600;
     letter-spacing: -0.005em;
     cursor: pointer;
-    transition: filter .15s var(--ease);
+    touch-action: manipulation;
+    transition: filter .15s var(--ease), transform .12s var(--ease);
   }
-  .editor-tag:hover { filter: brightness(.94); }
-  .editor-tag:active { transform: scale(.97); }
+  .editor-tag:active { transform: scale(.96); filter: brightness(.94); }
 
   .editor-tag-x {
     font-size: 13px;
@@ -672,7 +750,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 5px 10px;
+    padding: 6px 11px;
     border: 1px dashed var(--hairline-2);
     border-radius: 999px;
     background: transparent;
@@ -682,24 +760,30 @@
     font-weight: 600;
     letter-spacing: -0.005em;
     cursor: pointer;
+    touch-action: manipulation;
     transition: background .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease);
   }
-  .add-tag:hover {
-    background: var(--surface);
-    border-color: var(--ink-4);
-    color: var(--ink-2);
+  .add-tag:active { background: var(--surface); color: var(--ink-2); }
+
+  @media (hover: hover) {
+    .editor-tag:hover { filter: brightness(.94); }
+    .add-tag:hover {
+      background: var(--surface);
+      border-color: var(--ink-4);
+      color: var(--ink-2);
+    }
   }
 
   .tag-input {
     flex: 0 0 auto;
-    width: 120px;
-    padding: 5px 10px;
+    width: 130px;
+    padding: 5px 11px;
     border: 1px solid var(--accent);
     border-radius: 999px;
     background: var(--surface);
     color: var(--ink);
     font: inherit;
-    font-size: 11.5px;
+    font-size: 16px; /* 16px stops iOS zooming the page on focus */
     font-weight: 500;
     letter-spacing: -0.005em;
     outline: none;
@@ -717,7 +801,7 @@
   .editor {
     flex: 1;
     width: 100%;
-    padding: 40px 28px 80px;
+    padding: 32px 24px 60px;
     border: none;
     outline: none;
     resize: none;
@@ -728,6 +812,9 @@
     line-height: 1.7;
     letter-spacing: -0.005em;
     caret-color: var(--ink);
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
     transition: color .25s var(--ease);
   }
   .editor::placeholder {
@@ -740,7 +827,9 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 40px 28px 80px;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+    padding: 32px 24px 60px;
   }
 
   .markdown {
@@ -783,12 +872,8 @@
     color: var(--ink-2);
   }
 
-  .markdown :global(p) {
-    margin: 0 0 1em;
-  }
-  .markdown :global(p:last-child) {
-    margin-bottom: 0;
-  }
+  .markdown :global(p) { margin: 0 0 1em; }
+  .markdown :global(p:last-child) { margin-bottom: 0; }
 
   .markdown :global(a) {
     color: var(--accent);
@@ -845,12 +930,8 @@
     margin: 0.8em 0 1em;
     padding-left: 24px;
   }
-  .markdown :global(li) {
-    margin-bottom: 0.35em;
-  }
-  .markdown :global(li > p) {
-    margin: 0;
-  }
+  .markdown :global(li) { margin-bottom: 0.35em; }
+  .markdown :global(li > p) { margin: 0; }
 
   .markdown :global(li > input[type="checkbox"]) {
     margin-right: 8px;
@@ -895,14 +976,20 @@
 
   /* ══════════════ FOOTER ══════════════ */
   .foot {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 12px 20px calc(12px + env(safe-area-inset-bottom));
+    padding: 10px 20px calc(10px + env(safe-area-inset-bottom));
     border-top: 1px solid var(--hairline);
-    flex-shrink: 0;
+    background: var(--paper);
+    -webkit-touch-callout: none;
+    user-select: none;
+    -webkit-user-select: none;
   }
+  /* Keyboard is covering the home-indicator area, so drop the inset */
+  .foot.kb { padding-bottom: 10px; }
 
   .stats {
     display: flex;
@@ -933,12 +1020,19 @@
     color: var(--ink-2);
     border: 1px solid var(--hairline);
   }
+  /* Keyboard shortcuts mean nothing on touch devices */
+  @media (hover: none) {
+    .kbd-hint { display: none; }
+  }
 
   /* ══════════════ LIST EDITOR ══════════════ */
   .list-editor {
     flex: 1;
-    padding: 28px 24px 40px;
+    min-height: 0;
+    padding: 24px 20px calc(40px + env(safe-area-inset-bottom));
     overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
   }
 
   .list-title {
@@ -964,7 +1058,7 @@
     font-weight: 500;
     color: var(--ink-3);
     letter-spacing: -0.005em;
-    margin-bottom: 22px;
+    margin-bottom: 18px;
   }
 
   .items {
@@ -979,29 +1073,41 @@
   .item {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 6px 0;
-    min-height: 40px;
+    gap: 6px;
+    min-height: 48px;
   }
 
+  /* 44px tap target around a 22px visual box */
   .checkbox {
-    width: 22px;
-    height: 22px;
+    width: 44px;
+    height: 44px;
     flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
+    touch-action: manipulation;
+    position: relative;
+    margin-left: -10px;
+  }
+  .checkbox::before {
+    content: '';
+    width: 22px;
+    height: 22px;
     border: 1.5px solid var(--ink-4);
     border-radius: 7px;
-    background: transparent;
-    color: #fff;
-    cursor: pointer;
-    transition: background .18s var(--ease),
-                border-color .18s var(--ease);
-    padding: 0;
+    box-sizing: border-box;
+    transition: background .18s var(--ease), border-color .18s var(--ease), transform .12s var(--ease);
   }
-  .checkbox:hover { border-color: var(--ink-3); }
-  .checkbox.on {
+  .checkbox svg {
+    position: absolute;
+    color: #fff;
+  }
+  .checkbox:active::before { transform: scale(.9); }
+  .checkbox.on::before {
     background: var(--accent);
     border-color: var(--accent);
   }
@@ -1013,11 +1119,11 @@
     outline: none;
     background: transparent;
     font-family: var(--font-sans);
-    font-size: 15px;
+    font-size: 16px; /* 16px stops iOS zooming the page on focus */
     font-weight: 400;
     letter-spacing: -0.005em;
     color: var(--ink);
-    padding: 4px 0;
+    padding: 8px 0;
     transition: color .2s var(--ease);
   }
   .item-input::placeholder { color: var(--ink-4); }
@@ -1030,31 +1136,38 @@
   }
 
   .remove {
-    width: 26px;
-    height: 26px;
+    width: 40px;
+    height: 40px;
     display: flex;
     align-items: center;
     justify-content: center;
     border: none;
-    border-radius: 7px;
+    border-radius: 10px;
     background: transparent;
     color: var(--ink-4);
     cursor: pointer;
     flex-shrink: 0;
-    opacity: 0;
+    touch-action: manipulation;
     transition: opacity .15s var(--ease), background .15s var(--ease), color .15s var(--ease);
   }
-  .item:hover .remove,
-  .remove:focus-visible { opacity: 1; }
-  .remove:hover { background: var(--paper-2); color: var(--danger); }
+  .remove:active { background: var(--paper-2); color: var(--danger); }
+
+  /* Hover-reveal on desktop; always visible on touch (no hover there) */
+  @media (hover: hover) {
+    .remove { opacity: 0; }
+    .item:hover .remove,
+    .remove:focus-visible { opacity: 1; }
+    .remove:hover { background: var(--paper-2); color: var(--danger); }
+  }
 
   .add-item {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 9px 14px;
+    min-height: 44px;
+    padding: 9px 16px;
     border: 1px dashed var(--hairline-2);
-    border-radius: 10px;
+    border-radius: 12px;
     background: transparent;
     color: var(--ink-2);
     font: inherit;
@@ -1062,14 +1175,18 @@
     font-weight: 600;
     letter-spacing: -0.005em;
     cursor: pointer;
-    transition: background .18s var(--ease), border-color .18s var(--ease), color .18s var(--ease);
+    touch-action: manipulation;
+    transition: background .18s var(--ease), border-color .18s var(--ease), color .18s var(--ease), transform .12s var(--ease);
   }
-  .add-item:hover {
-    background: var(--paper-2);
-    border-color: var(--ink-4);
-    color: var(--ink);
+  .add-item:active { background: var(--paper-2); transform: scale(.98); }
+
+  @media (hover: hover) {
+    .add-item:hover {
+      background: var(--paper-2);
+      border-color: var(--ink-4);
+      color: var(--ink);
+    }
   }
-  .add-item:active { transform: scale(.98); }
 
   /* ══════════════ RESPONSIVE ══════════════ */
   @media (min-width: 720px) {
@@ -1084,7 +1201,7 @@
     .markdown :global(h2) { font-size: 26px; }
     .markdown :global(h3) { font-size: 21px; }
 
-    .head { padding: 16px 24px; }
+    .head { padding-left: 20px; padding-right: 20px; }
     .foot { padding: 14px 28px calc(14px + env(safe-area-inset-bottom)); }
     .tags-bar { padding: 10px 24px; }
     .list-editor { padding: 40px 48px 60px; }
@@ -1093,28 +1210,21 @@
 
   @media (max-width: 400px) {
     .editor,
-    .preview-shell { padding: 32px 20px 60px; font-size: 18px; }
+    .preview-shell { padding: 28px 20px 48px; font-size: 18px; }
     .markdown { font-size: 18px; }
     .markdown :global(h1) { font-size: 26px; }
     .markdown :global(h2) { font-size: 22px; }
 
-    .head { padding: 12px 14px; }
     .tags-bar { padding: 8px 14px; }
-    .list-editor { padding: 22px 18px 32px; }
+    .list-editor { padding: 20px 18px calc(32px + env(safe-area-inset-bottom)); }
     .list-title { font-size: 22px; }
     .status-slot { min-width: 40px; }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .editor-screen, .checkbox, .add-item, .remove,
-    .editor-tag, .add-tag, .preview-btn {
+    .app, .checkbox::before, .add-item, .remove,
+    .editor-tag, .add-tag, .preview-btn, .back-btn {
       transition: none;
-      animation: none;
     }
-  }
-
-  @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(6px); }
-    to   { opacity: 1; transform: translateY(0); }
   }
 </style>

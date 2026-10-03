@@ -12,6 +12,7 @@
   let stats = null;
   let confirmEmptyTrash = false;
   let emptiedMessage = false;
+  let scrolled = false;
 
   // Export / import state
   let exportState = 'idle';
@@ -37,6 +38,20 @@
     } catch (err) {
       console.error('[settings] stats failed:', err);
     }
+  }
+
+  function onScroll(e) {
+    scrolled = e.currentTarget.scrollTop > 4;
+  }
+
+  // Light haptic tick where supported (Android; ignored on iOS Safari)
+  function tick() {
+    if (navigator.vibrate) navigator.vibrate(8);
+  }
+
+  function choose(key, value) {
+    tick();
+    setPref(key, value);
   }
 
   function formatBytes(n) {
@@ -132,10 +147,13 @@
   }
 </script>
 
-<div class="settings">
-  <header class="head">
+<!-- App shell: locked to the screen. Only .scroll moves. -->
+<div class="app">
+
+  <!-- ══════════════ PINNED HEADER ══════════════ -->
+  <header class="head" class:scrolled>
     <button class="back-btn" on:click={() => dispatch('back')} aria-label="Back">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M15 6 L9 12 L15 18"/>
       </svg>
@@ -144,301 +162,324 @@
     <span class="head-spacer"></span>
   </header>
 
-  <div class="content">
+  <!-- ══════════════ SCROLLING CONTENT ══════════════ -->
+  <div class="scroll" on:scroll={onScroll}>
+    <div class="content">
 
-    <!-- ══════════════ SYNC ══════════════ -->
-    <section class="section">
-      <h2 class="section-title">Sync</h2>
+      <!-- ══════════════ SYNC ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">Sync</h2>
 
-      {#if !$authUser}
-        <button class="row row-button" on:click={() => dispatch('open-sync')}>
-          <div class="row-label">
-            <span class="row-name">Sync across devices</span>
-            <span class="row-hint">Encrypt and back up your notes</span>
-          </div>
-          <div class="row-chevron">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                 stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9 6 L15 12 L9 18"/>
-            </svg>
-          </div>
-        </button>
-      {:else}
-        <div class="row">
-          <div class="row-label">
-            <span class="row-name">Signed in</span>
-            <span class="row-hint">{$authUser.email}</span>
-          </div>
-          <span class="sync-state">
-            {#if $syncKey.locked}
-              <span class="state-pill locked">Locked</span>
-            {:else}
-              <span class="state-pill ok">Unlocked</span>
-            {/if}
-          </span>
-        </div>
-
-        {#if $syncKey.biometricAvailable && $syncKey.locked}
-          <button class="row row-button" on:click={() => dispatch('unlock-biometric')}>
-            <div class="row-label">
-              <span class="row-name">Unlock with biometrics</span>
-              <span class="row-hint">Use Face ID, Touch ID, or Windows Hello</span>
-            </div>
-            <div class="row-chevron">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 11 V15 M12 6 C15 6 17 8 17 11 V15 C17 19 15 21 12 21 C9 21 7 19 7 15 V11 C7 8 9 6 12 6 Z"/>
-              </svg>
-            </div>
-          </button>
-        {/if}
-
-        {#if !$syncKey.locked}
-          <div class="row">
-            <div class="row-label">
-              <span class="row-name">Last synced</span>
-              <span class="row-hint">
-                {#if $syncStatus === 'syncing'}
-                  Syncing…
-                {:else if $syncStatus === 'synced'}
-                  Just now
-                {:else if $syncStatus === 'offline'}
-                  Offline — will sync when you reconnect
-                {:else if $syncStatus === 'error'}
-                  <span class="row-error">Sync failed. Will retry.</span>
-                {:else if $lastSyncedAt}
-                  {formatSyncTime($lastSyncedAt)}
+        <div class="group">
+          {#if !$authUser}
+            <button class="row row-button" on:click={() => dispatch('open-sync')}>
+              <div class="row-label">
+                <span class="row-name">Sync across devices</span>
+                <span class="row-hint">Encrypt and back up your notes</span>
+              </div>
+              <div class="row-chevron">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                     stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9 6 L15 12 L9 18"/>
+                </svg>
+              </div>
+            </button>
+          {:else}
+            <div class="row">
+              <div class="row-label">
+                <span class="row-name">Signed in</span>
+                <span class="row-hint">{$authUser.email}</span>
+              </div>
+              <span class="sync-state">
+                {#if $syncKey.locked}
+                  <span class="state-pill locked">Locked</span>
                 {:else}
-                  Not synced yet
+                  <span class="state-pill ok">Unlocked</span>
                 {/if}
               </span>
             </div>
-            <button class="action-btn" on:click={() => dispatch('sync-now')}
-                    disabled={$syncStatus === 'syncing'}>
-              {$syncStatus === 'syncing' ? '…' : 'Sync now'}
-            </button>
-          </div>
-        {/if}
 
-        <button class="row row-button danger" on:click={() => dispatch('sign-out')}>
-          <div class="row-label">
-            <span class="row-name">Sign out</span>
-            <span class="row-hint">Keep local notes on this device</span>
-          </div>
-          <div class="row-chevron">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9 21 H5 A2 2 0 0 1 3 19 V5 A2 2 0 0 1 5 3 H9 M16 17 L21 12 L16 7 M21 12 H9"/>
-            </svg>
-          </div>
-        </button>
-
-        <button class="row row-button danger" on:click={() => dispatch('sign-out-clear')}>
-          <div class="row-label">
-            <span class="row-name">Sign out and clear local data</span>
-            <span class="row-hint">Remove notes from this device</span>
-          </div>
-          <div class="row-chevron">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 6 H21 M8 6 V4 A2 2 0 0 1 10 2 H14 A2 2 0 0 1 16 4 V6 M6 6 L7 20 A2 2 0 0 0 9 22 H15 A2 2 0 0 0 17 20 L18 6"/>
-            </svg>
-          </div>
-        </button>
-      {/if}
-    </section>
-
-    <!-- ══════════════ APPEARANCE ══════════════ -->
-    <section class="section">
-      <h2 class="section-title">Appearance</h2>
-
-      <div class="row">
-        <div class="row-label">
-          <span class="row-name">Theme</span>
-          <span class="row-hint">Light, dark, or follow the system</span>
-        </div>
-        <div class="segmented">
-          {#each ['light', 'dark', 'system'] as option}
-            <button
-              class="seg-btn"
-              class:selected={$prefs.theme === option}
-              on:click={() => setPref('theme', option)}
-            >
-              {option === 'light' ? 'Light' : option === 'dark' ? 'Dark' : 'Auto'}
-            </button>
-          {/each}
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="row-label">
-          <span class="row-name">Text size</span>
-          <span class="row-hint">Applies across the app</span>
-        </div>
-        <div class="segmented">
-          {#each ['small', 'medium', 'large'] as option}
-            <button
-              class="seg-btn"
-              class:selected={$prefs.fontSize === option}
-              on:click={() => setPref('fontSize', option)}
-            >
-              <span class="seg-size {option}">Aa</span>
-            </button>
-          {/each}
-        </div>
-      </div>
-    </section>
-
-    <!-- ══════════════ NOTES ══════════════ -->
-    <section class="section">
-      <h2 class="section-title">Notes</h2>
-
-      <div class="row">
-        <div class="row-label">
-          <span class="row-name">Default sort</span>
-          <span class="row-hint">How the notes list orders itself</span>
-        </div>
-        <div class="select-wrap">
-          <select
-            class="select"
-            value={$prefs.defaultSort}
-            on:change={(e) => setPref('defaultSort', e.currentTarget.value)}
-          >
-            <option value="updated">Recently edited</option>
-            <option value="created">Recently created</option>
-            <option value="title">Title A → Z</option>
-          </select>
-          <svg class="select-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none"
-               stroke="currentColor" stroke-width="2.4"
-               stroke-linecap="round" stroke-linejoin="round">
-            <path d="M6 9 L12 15 L18 9"/>
-          </svg>
-        </div>
-      </div>
-
-      <button class="row row-button" on:click={openTrash}>
-        <div class="row-label">
-          <span class="row-name">Trash</span>
-          <span class="row-hint">
-            {#if stats}
-              {stats.trash === 0
-                ? 'Empty'
-                : `${stats.trash} ${stats.trash === 1 ? 'note' : 'notes'} waiting`}
-            {:else}
-              Loading…
+            {#if $syncKey.biometricAvailable && $syncKey.locked}
+              <button class="row row-button" on:click={() => dispatch('unlock-biometric')}>
+                <div class="row-label">
+                  <span class="row-name">Unlock with biometrics</span>
+                  <span class="row-hint">Use Face ID, Touch ID, or Windows Hello</span>
+                </div>
+                <div class="row-chevron">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                       stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 11 V15 M12 6 C15 6 17 8 17 11 V15 C17 19 15 21 12 21 C9 21 7 19 7 15 V11 C7 8 9 6 12 6 Z"/>
+                  </svg>
+                </div>
+              </button>
             {/if}
-          </span>
-        </div>
-        <div class="row-chevron">
-          {#if stats && stats.trash > 0}
-            <span class="row-badge">{stats.trash}</span>
+
+            {#if !$syncKey.locked}
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-name">Last synced</span>
+                  <span class="row-hint">
+                    {#if $syncStatus === 'syncing'}
+                      Syncing…
+                    {:else if $syncStatus === 'synced'}
+                      Just now
+                    {:else if $syncStatus === 'offline'}
+                      Offline — will sync when you reconnect
+                    {:else if $syncStatus === 'error'}
+                      <span class="row-error">Sync failed. Will retry.</span>
+                    {:else if $lastSyncedAt}
+                      {formatSyncTime($lastSyncedAt)}
+                    {:else}
+                      Not synced yet
+                    {/if}
+                  </span>
+                </div>
+                <button class="action-btn" on:click={() => dispatch('sync-now')}
+                        disabled={$syncStatus === 'syncing'}>
+                  {$syncStatus === 'syncing' ? '…' : 'Sync now'}
+                </button>
+              </div>
+            {/if}
+
+            <button class="row row-button danger" on:click={() => dispatch('sign-out')}>
+              <div class="row-label">
+                <span class="row-name">Sign out</span>
+                <span class="row-hint">Keep local notes on this device</span>
+              </div>
+              <div class="row-chevron">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9 21 H5 A2 2 0 0 1 3 19 V5 A2 2 0 0 1 5 3 H9 M16 17 L21 12 L16 7 M21 12 H9"/>
+                </svg>
+              </div>
+            </button>
+
+            <button class="row row-button danger" on:click={() => dispatch('sign-out-clear')}>
+              <div class="row-label">
+                <span class="row-name">Sign out and clear local data</span>
+                <span class="row-hint">Remove notes from this device</span>
+              </div>
+              <div class="row-chevron">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 6 H21 M8 6 V4 A2 2 0 0 1 10 2 H14 A2 2 0 0 1 16 4 V6 M6 6 L7 20 A2 2 0 0 0 9 22 H15 A2 2 0 0 0 17 20 L18 6"/>
+                </svg>
+              </div>
+            </button>
           {/if}
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 6 L15 12 L9 18"/>
-          </svg>
         </div>
-      </button>
-    </section>
+      </section>
 
-    <!-- ══════════════ DATA ══════════════ -->
-    <section class="section">
-      <h2 class="section-title">Data</h2>
+      <!-- ══════════════ APPEARANCE ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">Appearance</h2>
 
-      <div class="row">
-        <div class="row-label">
-          <span class="row-name">Export all notes</span>
-          <span class="row-hint">
-            {#if exportState === 'working'}
-              Preparing…
-            {:else if exportState === 'done' && exportInfo}
-              Saved {exportInfo.count} {exportInfo.count === 1 ? 'note' : 'notes'} · {formatBytes(exportInfo.bytes)}
-            {:else if exportState === 'error'}
-              <span class="row-error">{exportError}</span>
-            {:else}
-              A single .json file with every note and preference
-            {/if}
-          </span>
-        </div>
-        <button
-          class="action-btn"
-          disabled={exportState === 'working'}
-          on:click={doExport}
-        >
-          {exportState === 'working' ? '…' : 'Export'}
-        </button>
-      </div>
-
-      <button class="row row-button" on:click={pickImportFile}>
-        <div class="row-label">
-          <span class="row-name">Import from a Mote backup</span>
-          <span class="row-hint">Merge notes from an exported .json file</span>
-        </div>
-        <div class="row-chevron">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 4 V16 M7 11 L12 16 L17 11 M4 20 H20"/>
-          </svg>
-        </div>
-      </button>
-
-      <input
-        bind:this={fileInputEl}
-        type="file"
-        accept="application/json,.json"
-        class="hidden-file"
-        on:change={onFileChosen}
-      />
-    </section>
-
-    <!-- ══════════════ STORAGE ══════════════ -->
-    <section class="section">
-      <h2 class="section-title">Storage</h2>
-
-      <div class="storage-card">
-        {#if stats}
-          <div class="storage-row">
-            <span class="storage-label">Notes</span>
-            <span class="storage-value">{stats.active}</span>
+        <div class="group">
+          <div class="row">
+            <div class="row-label">
+              <span class="row-name">Theme</span>
+              <span class="row-hint">Light, dark, or follow the system</span>
+            </div>
+            <div class="segmented">
+              {#each ['light', 'dark', 'system'] as option}
+                <button
+                  class="seg-btn"
+                  class:selected={$prefs.theme === option}
+                  on:click={() => choose('theme', option)}
+                >
+                  {option === 'light' ? 'Light' : option === 'dark' ? 'Dark' : 'Auto'}
+                </button>
+              {/each}
+            </div>
           </div>
-          <div class="storage-row">
-            <span class="storage-label">In trash</span>
-            <span class="storage-value">{stats.trash}</span>
-          </div>
-          <div class="storage-row">
-            <span class="storage-label">Total size</span>
-            <span class="storage-value">{formatBytes(stats.bytes)}</span>
-          </div>
-          <div class="storage-note">
-            Everything is stored on this device only. Nothing is uploaded unless you enable sync.
-          </div>
-        {:else}
-          <div class="storage-loading">Loading…</div>
-        {/if}
-      </div>
-    </section>
 
-    <!-- ══════════════ ABOUT ══════════════ -->
-    <section class="section">
-      <h2 class="section-title">About</h2>
-      <div class="about">
-        <div class="about-row">
-          <span class="about-label">Mote</span>
-          <span class="about-value">v0.6</span>
+          <div class="row">
+            <div class="row-label">
+              <span class="row-name">Text size</span>
+              <span class="row-hint">Applies across the app</span>
+            </div>
+            <div class="segmented">
+              {#each ['small', 'medium', 'large'] as option}
+                <button
+                  class="seg-btn"
+                  class:selected={$prefs.fontSize === option}
+                  on:click={() => choose('fontSize', option)}
+                  aria-label={`${option} text`}
+                >
+                  <span class="seg-size {option}">Aa</span>
+                </button>
+              {/each}
+            </div>
+          </div>
         </div>
-        <p class="about-text">
-          A quiet place for thoughts. Your notes are encrypted on this device
-          before they leave it — if you enable sync, even we can't read them.
-        </p>
-      </div>
-    </section>
+      </section>
 
-    {#if emptiedMessage}
-      <div class="toast">Trash emptied</div>
-    {/if}
+      <!-- ══════════════ NOTES ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">Notes</h2>
+
+        <div class="group">
+          <div class="row">
+            <div class="row-label">
+              <span class="row-name">Default sort</span>
+              <span class="row-hint">How the notes list orders itself</span>
+            </div>
+            <div class="select-wrap">
+              <select
+                class="select"
+                value={$prefs.defaultSort}
+                on:change={(e) => choose('defaultSort', e.currentTarget.value)}
+              >
+                <option value="updated">Recently edited</option>
+                <option value="created">Recently created</option>
+                <option value="title">Title A → Z</option>
+              </select>
+              <svg class="select-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none"
+                   stroke="currentColor" stroke-width="2.4"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 9 L12 15 L18 9"/>
+              </svg>
+            </div>
+          </div>
+
+          <button class="row row-button" on:click={openTrash}>
+            <div class="row-label">
+              <span class="row-name">Trash</span>
+              <span class="row-hint">
+                {#if stats}
+                  {stats.trash === 0
+                    ? 'Empty'
+                    : `${stats.trash} ${stats.trash === 1 ? 'note' : 'notes'} waiting`}
+                {:else}
+                  Loading…
+                {/if}
+              </span>
+            </div>
+            <div class="row-chevron">
+              {#if stats && stats.trash > 0}
+                <span class="row-badge">{stats.trash}</span>
+              {/if}
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                   stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 6 L15 12 L9 18"/>
+              </svg>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      <!-- ══════════════ DATA ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">Data</h2>
+
+        <div class="group">
+          <div class="row">
+            <div class="row-label">
+              <span class="row-name">Export all notes</span>
+              <span class="row-hint">
+                {#if exportState === 'working'}
+                  Preparing…
+                {:else if exportState === 'done' && exportInfo}
+                  Saved {exportInfo.count} {exportInfo.count === 1 ? 'note' : 'notes'} · {formatBytes(exportInfo.bytes)}
+                {:else if exportState === 'error'}
+                  <span class="row-error">{exportError}</span>
+                {:else}
+                  A single .json file with every note and preference
+                {/if}
+              </span>
+            </div>
+            <button
+              class="action-btn"
+              disabled={exportState === 'working'}
+              on:click={doExport}
+            >
+              {exportState === 'working' ? '…' : 'Export'}
+            </button>
+          </div>
+
+          <button class="row row-button" on:click={pickImportFile}>
+            <div class="row-label">
+              <span class="row-name">Import from a Mote backup</span>
+              <span class="row-hint">
+                {#if importState === 'parsing'}
+                  Reading file…
+                {:else if importState === 'error' && importError}
+                  <span class="row-error">{importError}</span>
+                {:else}
+                  Merge notes from an exported .json file
+                {/if}
+              </span>
+            </div>
+            <div class="row-chevron">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                   stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 4 V16 M7 11 L12 16 L17 11 M4 20 H20"/>
+              </svg>
+            </div>
+          </button>
+        </div>
+
+        <input
+          bind:this={fileInputEl}
+          type="file"
+          accept="application/json,.json"
+          class="hidden-file"
+          on:change={onFileChosen}
+        />
+      </section>
+
+      <!-- ══════════════ STORAGE ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">Storage</h2>
+
+        <div class="storage-card">
+          {#if stats}
+            <div class="storage-row">
+              <span class="storage-label">Notes</span>
+              <span class="storage-value">{stats.active}</span>
+            </div>
+            <div class="storage-row">
+              <span class="storage-label">In trash</span>
+              <span class="storage-value">{stats.trash}</span>
+            </div>
+            <div class="storage-row">
+              <span class="storage-label">Total size</span>
+              <span class="storage-value">{formatBytes(stats.bytes)}</span>
+            </div>
+            <div class="storage-note">
+              Everything is stored on this device only. Nothing is uploaded unless you enable sync.
+            </div>
+          {:else}
+            <div class="storage-loading">Loading…</div>
+          {/if}
+        </div>
+      </section>
+
+      <!-- ══════════════ ABOUT ══════════════ -->
+      <section class="section">
+        <h2 class="section-title">About</h2>
+        <div class="about">
+          <div class="about-row">
+            <span class="about-label">Mote</span>
+            <span class="about-value">v0.6</span>
+          </div>
+          <p class="about-text">
+            A quiet place for thoughts. Your notes are encrypted on this device
+            before they leave it — if you enable sync, even we can't read them.
+          </p>
+        </div>
+      </section>
+
+    </div>
   </div>
+
+  <!-- Toast lives in the fixed shell, outside the scroller -->
+  {#if emptiedMessage}
+    <div class="toast" role="status">Trash emptied</div>
+  {/if}
 </div>
 
+<!-- ══════════════ DIALOGS ══════════════ -->
 {#if confirmEmptyTrash}
   <div class="overlay" on:click={() => (confirmEmptyTrash = false)} on:keydown role="presentation">
     <div class="confirm" on:click|stopPropagation on:keydown role="dialog" aria-modal="true">
@@ -457,7 +498,7 @@
   </div>
 {/if}
 
-{#if importState === 'preview' && importPreview}
+{#if (importState === 'preview' || importState === 'importing') && importPreview}
   <div class="overlay" on:click={cancelImport} on:keydown role="presentation">
     <div class="confirm wide" on:click|stopPropagation on:keydown role="dialog" aria-modal="true">
       <h3 class="confirm-title">Import {importPreview.notes.length} notes?</h3>
@@ -503,8 +544,10 @@
       </div>
 
       <div class="confirm-actions">
-        <button class="confirm-btn secondary" on:click={cancelImport}>Cancel</button>
-        <button class="confirm-btn primary" on:click={confirmImport}>
+        <button class="confirm-btn secondary" on:click={cancelImport}
+                disabled={importState === 'importing'}>Cancel</button>
+        <button class="confirm-btn primary" on:click={confirmImport}
+                disabled={importState === 'importing'}>
           {importState === 'importing' ? 'Importing…' : 'Import'}
         </button>
       </div>
@@ -535,40 +578,52 @@
 {/if}
 
 <style>
-  .settings {
+  /* ══════════════ APP SHELL ══════════════ */
+  /* No animation or transform on .app: either would turn it into the
+     containing block for fixed/absolute descendants and break layout. */
+  .app {
+    position: fixed;
+    inset: 0;
     width: min(100%, 640px);
     margin: 0 auto;
-    min-height: 100vh;
-    min-height: 100dvh;
     display: flex;
     flex-direction: column;
-    animation: fadeUp .35s var(--ease) both;
+    overflow: hidden;
+    background: var(--paper);
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
   }
 
   .head {
+    flex: 0 0 auto;
+    position: relative;
+    z-index: 10;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 20px 20px 16px;
-    flex-shrink: 0;
+    padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
+    background: var(--paper);
+    border-bottom: 1px solid transparent;
+    transition: border-color .2s var(--ease);
   }
+  .head.scrolled { border-bottom-color: var(--hairline); }
+
   .back-btn {
-    width: 34px;
-    height: 34px;
+    width: 44px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
     border: none;
-    border-radius: 10px;
+    border-radius: 12px;
     background: transparent;
     color: var(--ink);
     cursor: pointer;
     flex-shrink: 0;
-    transition: background .15s var(--ease);
+    transition: background .15s var(--ease), transform .15s var(--ease);
   }
-  .back-btn:hover { background: var(--paper-2); }
-  .back-btn:active { transform: scale(.94); }
+  .back-btn:active { background: var(--paper-2); transform: scale(.94); }
 
   .title {
     margin: 0;
@@ -577,14 +632,24 @@
     letter-spacing: -0.025em;
     color: var(--ink);
   }
-  .head-spacer { width: 34px; }
+  .head-spacer { width: 44px; }
+
+  .scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .scroll::-webkit-scrollbar { display: none; }
 
   .content {
-    flex: 1;
-    padding: 0 20px calc(40px + env(safe-area-inset-bottom));
+    padding: 12px 20px calc(40px + env(safe-area-inset-bottom));
     display: flex;
     flex-direction: column;
     gap: 26px;
+    animation: fadeUp .35s var(--ease) both;
   }
 
   .section { display: flex; flex-direction: column; }
@@ -597,18 +662,26 @@
     color: var(--ink-3);
   }
 
+  /* ══════════════ GROUPED ROWS ══════════════ */
+  /* The group owns the rounded corners, so row order and element type
+     (div vs button) no longer affect the rounding. */
+  .group {
+    border: 1px solid var(--hairline);
+    border-radius: 16px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+
   .row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--hairline);
+    min-height: 56px;
+    padding: 12px 16px;
     background: var(--surface);
   }
-  .row:first-of-type { border-radius: 16px 16px 0 0; }
-  .row:last-child { border-radius: 0 0 16px 16px; border-bottom: none; }
-  .row:only-of-type { border-radius: 16px; }
+  .row + .row { border-top: 1px solid var(--hairline); }
 
   .row-label {
     min-width: 0;
@@ -636,13 +709,22 @@
 
   .row-button {
     width: 100%;
+    border: none;
+    border-radius: 0;
     font: inherit;
     text-align: left;
     cursor: pointer;
-    transition: background .15s var(--ease);
+    touch-action: manipulation;
+    transition: background .12s var(--ease);
   }
-  .row-button:hover { background: var(--paper-2); }
+  .row + .row-button,
+  .row-button + .row-button { border-top: 1px solid var(--hairline); }
+  .row-button:active { background: var(--paper-2); }
   .row-button.danger .row-name { color: var(--danger); }
+
+  @media (hover: hover) {
+    .row-button:hover { background: var(--paper-2); }
+  }
 
   .row-chevron {
     display: flex;
@@ -692,6 +774,7 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
+    min-height: 32px;
     padding: 6px 12px;
     border: none;
     border-radius: 8px;
@@ -702,9 +785,10 @@
     font-weight: 600;
     letter-spacing: -0.005em;
     cursor: pointer;
-    transition: background .15s var(--ease), color .15s var(--ease);
+    touch-action: manipulation;
+    transition: background .15s var(--ease), color .15s var(--ease), transform .12s var(--ease);
   }
-  .seg-btn:hover { color: var(--ink); }
+  .seg-btn:active { transform: scale(.95); }
   .seg-btn.selected {
     background: var(--surface);
     color: var(--ink);
@@ -720,20 +804,19 @@
   .select {
     appearance: none;
     -webkit-appearance: none;
-    padding: 8px 30px 8px 12px;
+    padding: 9px 30px 9px 12px;
     border: 1px solid var(--hairline-2);
     border-radius: 10px;
     background: var(--surface);
     color: var(--ink);
     font: inherit;
-    font-size: 13px;
+    font-size: 16px; /* 16px stops iOS zooming the page on focus */
     font-weight: 500;
     letter-spacing: -0.005em;
     cursor: pointer;
-    min-width: 150px;
+    min-width: 160px;
     transition: border-color .15s var(--ease);
   }
-  .select:hover { border-color: var(--ink-4); }
   .select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .select-chevron {
     position: absolute;
@@ -746,6 +829,7 @@
 
   /* ── action button ── */
   .action-btn {
+    min-height: 36px;
     padding: 8px 14px;
     border: 1px solid var(--hairline-2);
     border-radius: 10px;
@@ -757,9 +841,10 @@
     letter-spacing: -0.005em;
     cursor: pointer;
     flex-shrink: 0;
-    transition: background .15s var(--ease), border-color .15s var(--ease);
+    touch-action: manipulation;
+    transition: background .15s var(--ease), border-color .15s var(--ease), transform .12s var(--ease);
   }
-  .action-btn:hover:not(:disabled) { background: var(--paper-2); border-color: var(--ink-4); }
+  .action-btn:active:not(:disabled) { background: var(--paper-2); transform: scale(.96); }
   .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* ── storage ── */
@@ -838,7 +923,7 @@
 
   /* ── toast ── */
   .toast {
-    position: fixed;
+    position: absolute;
     left: 50%;
     bottom: calc(24px + env(safe-area-inset-bottom));
     transform: translateX(-50%);
@@ -901,6 +986,7 @@
   .confirm-actions { display: flex; gap: 8px; }
   .confirm-btn {
     flex: 1;
+    min-height: 46px;
     padding: 12px;
     border: none;
     border-radius: 12px;
@@ -908,9 +994,11 @@
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
-    transition: transform .18s var(--ease);
+    touch-action: manipulation;
+    transition: transform .18s var(--ease), opacity .15s var(--ease);
   }
-  .confirm-btn:active { transform: scale(.97); }
+  .confirm-btn:active:not(:disabled) { transform: scale(.97); }
+  .confirm-btn:disabled { opacity: .5; cursor: not-allowed; }
   .confirm-btn.secondary { background: var(--paper-2); color: var(--ink); }
   .confirm-btn.danger { background: var(--danger); color: #fff; }
   .confirm-btn.primary { background: var(--ink); color: var(--paper); }
@@ -943,9 +1031,9 @@
     border-radius: 12px;
     background: var(--surface);
     cursor: pointer;
+    touch-action: manipulation;
     transition: border-color .15s var(--ease), background .15s var(--ease);
   }
-  .strategy-option:hover { border-color: var(--hairline-2); }
   .strategy-option.selected {
     border-color: var(--accent);
     background: var(--accent-soft);
@@ -983,6 +1071,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .settings, .overlay, .confirm, .toast { animation: none; transition: none; }
+    .content, .overlay, .confirm, .toast { animation: none; }
+    .head, .row-button, .seg-btn, .action-btn, .back-btn, .confirm-btn { transition: none; }
   }
 </style>

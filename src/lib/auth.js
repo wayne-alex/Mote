@@ -1,8 +1,10 @@
 // src/lib/auth.js
-import { writable } from 'svelte/store';
+import { writable, get } from 'svelte/store';
 import {
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   sendSignInLinkToEmail,
   isSignInWithEmailLink,
   signInWithEmailLink,
@@ -14,8 +16,8 @@ import { auth } from './firebase.js';
 const EMAIL_LINK_KEY = 'mote:emailForSignIn';
 
 // ── Observable state ─────────────────────────────────────────
-export const authUser = writable(null);       // Firebase User | null
-export const authReady = writable(false);     // true once initial state is known
+export const authUser = writable(null);
+export const authReady = writable(false);
 export const authError = writable(null);
 
 let unsubscribe = null;
@@ -41,25 +43,82 @@ export function initAuth() {
 }
 
 // ── Sign in with Google ──────────────────────────────────────
+
+/**
+ * Sign in with Google.
+ *
+ * In production (HTTPS, non-localhost), we use signInWithRedirect
+ * because popups are frequently blocked by browsers and COOP
+ * policies. In dev on localhost, we use signInWithPopup because
+ * it's faster and localhost doesn't have the same restrictions.
+ *
+ * Returns the signed-in user, OR null if a redirect was initiated
+ * (in which case the page is about to reload).
+ */
 export async function signInWithGoogle() {
   authError.set(null);
+
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+
+  const isLocalhost =
+    typeof window !== 'undefined' &&
+    (window.location.hostname === 'localhost' ||
+     window.location.hostname === '127.0.0.1');
+
+  if (isLocalhost) {
+    // Dev: try popup, fall back to redirect if blocked
+    try {
+      const result = await signInWithPopup(auth, provider);
+      return result.user;
+    } catch (err) {
+      if (err?.code === 'auth/popup-blocked' ||
+          err?.code === 'auth/popup-closed-by-user') {
+        console.warn('[auth] popup blocked in dev, falling back to redirect');
+        await signInWithRedirect(auth, provider);
+        return null;   // page will reload
+      }
+      console.error('[auth] google sign-in failed:', err);
+      authError.set(friendlyError(err));
+      throw err;
+    }
+  }
+
+  // Production: always use redirect
   try {
-    const provider = new GoogleAuthProvider();
-    provider.setCustomParameters({ prompt: 'select_account' });
-    const result = await signInWithPopup(auth, provider);
-    return result.user;
+    await signInWithRedirect(auth, provider);
+    return null;   // page will reload; getRedirectResult() picks it up
   } catch (err) {
-    console.error('[auth] google sign-in failed:', err);
+    console.error('[auth] google redirect failed:', err);
     authError.set(friendlyError(err));
     throw err;
   }
 }
 
-// ── Sign in with email link ──────────────────────────────────
 /**
- * Send the magic link. Stores the email locally so we can
- * complete the sign-in when the user clicks the link.
+ * Called once on app boot. If the page just came back from a
+ * Google sign-in redirect, this resolves the result.
+ *
+ * Returns the signed-in user, or null if there was no redirect
+ * to process.
  */
+export async function completeRedirectSignIn() {
+  try {
+    const result = await getRedirectResult(auth);
+    return result?.user || null;
+  } catch (err) {
+    // A few errors here are expected and harmless:
+    //   - auth/no-auth-event: the user landed on the page normally
+    //   - auth/popup-blocked: transitive from an older attempt
+    if (err?.code === 'auth/no-auth-event') return null;
+    console.error('[auth] redirect completion failed:', err);
+    authError.set(friendlyError(err));
+    return null;
+  }
+}
+
+// ── Sign in with email link ──────────────────────────────────
+
 export async function sendEmailLink(email, returnUrl) {
   authError.set(null);
   if (!email || !email.includes('@')) {
@@ -84,16 +143,11 @@ export async function sendEmailLink(email, returnUrl) {
   }
 }
 
-/**
- * Called on app boot. If the current URL is a sign-in link,
- * complete the sign-in using the stored email.
- */
 export async function completeEmailLinkSignIn() {
   if (!isSignInWithEmailLink(auth, window.location.href)) return null;
 
   let email = localStorage.getItem(EMAIL_LINK_KEY);
   if (!email) {
-    // Prompt the user for their email if we don't have it stored
     email = window.prompt('Confirm the email you used to request this link:');
     if (!email) return null;
   }
@@ -101,7 +155,6 @@ export async function completeEmailLinkSignIn() {
   try {
     const result = await signInWithEmailLink(auth, email, window.location.href);
     localStorage.removeItem(EMAIL_LINK_KEY);
-    // Clean the URL so the link params don't linger
     window.history.replaceState({}, '', '/');
     return result.user;
   } catch (err) {
@@ -124,9 +177,15 @@ export async function signOutNow() {
 function friendlyError(err) {
   const code = err?.code || '';
   if (code === 'auth/popup-closed-by-user') return 'Sign-in cancelled.';
-  if (code === 'auth/popup-blocked') return 'Pop-up was blocked. Allow pop-ups for this site and try again.';
+  if (code === 'auth/popup-blocked') return 'Your browser blocked the sign-in window. Redirecting…';
   if (code === 'auth/network-request-failed') return 'Network error. Check your connection.';
   if (code === 'auth/invalid-email') return 'That email address looks invalid.';
-  if (code === 'auth/unauthorized-domain') return 'This domain isn\'t authorized for sign-in. Ask the developer to add it in Firebase Console.';
+  if (code === 'auth/unauthorized-domain') {
+    return 'This domain isn\'t authorized for sign-in. Add it in Firebase Console → Authentication → Settings → Authorized domains.';
+  }
+  if (code === 'auth/cancelled-popup-request') return 'Sign-in was cancelled.';
+  if (code === 'auth/operation-not-supported-in-this-environment') {
+    return 'Sign-in requires HTTPS. Open the app over a secure connection.';
+  }
   return err?.message || 'Something went wrong. Try again.';
 }

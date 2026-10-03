@@ -9,6 +9,7 @@
   import CommandPalette from './components/CommandPalette.svelte';
   import InstallBanner from './components/InstallBanner.svelte';
   import SignInFlow from './components/SignInFlow.svelte';
+  import SharedListView from './components/SharedListView.svelte';
 
   import {
     listActiveNotes,
@@ -26,10 +27,11 @@
   import { createNote } from './lib/notes.js';
   import { prefs, setPref, watchSystemTheme } from './lib/prefs.js';
 
-  import {
+   import {
     initAuth,
     authUser,
     completeEmailLinkSignIn,
+    completeRedirectSignIn,
     signOutNow,
   } from './lib/auth.js';
 
@@ -56,10 +58,15 @@
     resetSyncState,
   } from './lib/sync-store.js';
 
+  import {
+    createSharedList,
+    getSharedTokenFromPath,
+  } from './lib/shared.js';
+
   // ═══════════════════════════════════════════════════════════
   // STATE
   // ═══════════════════════════════════════════════════════════
-  let view = 'list';
+  let view = 'list';             // 'list' | 'edit' | 'trash' | 'settings'
   let notes = [];
   let trashNotes = [];
   let trashCount = 0;
@@ -70,6 +77,12 @@
   let commandPaletteOpen = false;
   let showSignInFlow = false;
 
+  // Shared list routing — populated at boot from the URL, or by
+  // the "New shared list" flow. When non-null, the shared view
+  // takes over the entire screen.
+  let activeSharedToken = null;
+  let newSharedKindPickerOpen = false;
+
   let untagSystemTheme = null;
   let unsubscribeSave = null;
   let unsubscribeSyncKey = null;
@@ -78,13 +91,29 @@
   // ═══════════════════════════════════════════════════════════
   // BOOT
   // ═══════════════════════════════════════════════════════════
-  onMount(async () => {
+    onMount(async () => {
     untagSystemTheme = watchSystemTheme();
     initAuth();
 
-    await completeEmailLinkSignIn().catch((err) => {
-      console.warn('[auth] email link completion failed:', err);
-    });
+    // Both sign-in methods can return the user to this URL:
+    //  - Email link lands on whatever URL was in the email
+    //  - Google redirect lands on whatever URL the user came from
+    // We try both — only one will match, the other returns null.
+    await Promise.all([
+      completeEmailLinkSignIn().catch((err) => {
+        console.warn('[auth] email link completion failed:', err);
+      }),
+      completeRedirectSignIn().catch((err) => {
+        console.warn('[auth] google redirect completion failed:', err);
+      }),
+    ]);
+
+    // Check if the URL is a shared-list link
+    activeSharedToken = getSharedTokenFromPath();
+    if (activeSharedToken) {
+      // We're rendering a shared list — no need for personal notes to load,
+      // but boot auth + sync anyway so the user can navigate home.
+    }
 
     await refreshList();
 
@@ -111,10 +140,14 @@
 
     startPeriodicSync();
 
+    // Personal note share target (personal notes only — see manifest)
     const shared = await handleSharePayload();
     if (shared) return;
 
     await handleShortcutAction();
+
+    // Handle browser back button to /s/:token
+    window.addEventListener('popstate', onPopState);
   });
 
   onDestroy(() => {
@@ -124,7 +157,15 @@
     stopPeriodicSync();
     window.removeEventListener('online', handleOnline);
     window.removeEventListener('offline', handleOffline);
+    window.removeEventListener('popstate', onPopState);
   });
+
+  function onPopState() {
+    // If the user navigates back to /s/:token, open that list.
+    // If they navigate back to /, close the shared view.
+    const token = getSharedTokenFromPath();
+    activeSharedToken = token;
+  }
 
   // ═══════════════════════════════════════════════════════════
   // REACTIVE: biometric availability
@@ -141,6 +182,9 @@
   // GLOBAL SHORTCUTS
   // ═══════════════════════════════════════════════════════════
   function onGlobalKeydown(e) {
+    // Don't fire shortcuts while a shared list is open — it has its own UI
+    if (activeSharedToken) return;
+
     const meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
 
@@ -195,7 +239,7 @@
   }
 
   // ═══════════════════════════════════════════════════════════
-  // SHARE + SHORTCUTS
+  // SHARE TARGET + SHORTCUTS (personal notes only)
   // ═══════════════════════════════════════════════════════════
   async function handleSharePayload() {
     const params = new URLSearchParams(window.location.search);
@@ -271,10 +315,49 @@
     await refreshList();
   }
 
-  function handleSaved() {}
+  function handleSaved() {
+    // No-op — the editor mutates the note object in place and
+    // the sync listener pushes changes automatically.
+  }
 
   async function handleImported() {
     await refreshList();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // SHARED LISTS
+  // ═══════════════════════════════════════════════════════════
+  function handleOpenShared(token) {
+    activeSharedToken = token;
+    window.history.pushState({}, '', `/s/${token}`);
+  }
+
+  function handleNewShared() {
+    if (!$authUser) {
+      // Prompt sign-in first — shared lists need an identity for
+      // the members list.
+      showSignInFlow = true;
+      return;
+    }
+    newSharedKindPickerOpen = true;
+  }
+
+  async function createNewShared(kind, listStyle) {
+    newSharedKindPickerOpen = false;
+    try {
+      const { token } = await createSharedList({ listStyle, title: '' });
+      activeSharedToken = token;
+      window.history.pushState({}, '', `/s/${token}`);
+    } catch (err) {
+      console.error('[shared] create failed:', err);
+      alert(err.message || 'Could not create shared list.');
+    }
+  }
+
+  function closeShared() {
+    activeSharedToken = null;
+    window.history.pushState({}, '', '/');
+    refreshList();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -399,130 +482,220 @@
 <svelte:window on:keydown={onGlobalKeydown} />
 
 <div class="mote">
-  {#key view}
-    <div in:fade={{ duration: 160 }}>
-      {#if view === 'list'}
-        <NotesList
-          {notes}
-          {loading}
-          {trashCount}
-          on:open={(e) => openNote(e.detail)}
-          on:create={handleCreate}
-          on:delete={(e) => handleDelete(e.detail)}
-          on:settings={() => (view = 'settings')}
-          on:open-trash={openTrash}
-        />
-      {:else if view === 'edit' && currentNote}
-        <Editor
-          note={currentNote}
-          on:back={handleEditorBack}
-          on:saved={handleSaved}
-        />
-      {:else if view === 'trash'}
-        <TrashView
-          notes={trashNotes}
-          loading={trashLoading}
-          on:back={trashBack}
-          on:restore={(e) => handleRestore(e.detail)}
-          on:purge={(e) => handlePurge(e.detail)}
-          on:empty={handleEmptyTrash}
-        />
-      {:else if view === 'settings'}
-        <SettingsView
-          on:back={settingsBack}
-          on:open-trash={openTrash}
-          on:imported={handleImported}
-          on:open-sync={handleOpenSync}
-          on:sync-now={handleSyncNow}
-          on:unlock-biometric={handleBiometricUnlock}
-          on:sign-out={handleSignOut}
-          on:sign-out-clear={handleSignOutClear}
-        />
-      {/if}
-    </div>
-  {/key}
 
-  <!-- ══════════════ KIND PICKER ══════════════ -->
-  {#if kindPickerOpen}
-    <div class="overlay" on:click={() => (kindPickerOpen = false)} on:keydown role="presentation">
-      <div class="sheet" on:click|stopPropagation on:keydown role="dialog" aria-modal="true">
-        <div class="grabber"></div>
-        <h3 class="sheet-title">What kind of note?</h3>
-        <p class="sheet-text">Pick a starting point.</p>
-
-        <div class="kinds">
-          <button class="kind-card" on:click={() => createOfKind('doc')}>
-            <div class="kind-icon doc">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
-                   stroke="currentColor" stroke-width="1.8"
-                   stroke-linecap="round" stroke-linejoin="round">
-                <path d="M6 3.5 H15 L19 7.5 V20.5 H6 Z"/>
-                <path d="M15 3.5 V7.5 H19"/>
-                <path d="M9 12 H15 M9 15.5 H15 M9 19 H12"/>
-              </svg>
-            </div>
-            <div class="kind-body">
-              <div class="kind-name">Note</div>
-              <div class="kind-desc">Free-form writing, markdown-friendly</div>
-            </div>
-          </button>
-
-          <button class="kind-card" on:click={() => createOfKind('list', 'todo')}>
-            <div class="kind-icon list">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
-                   stroke="currentColor" stroke-width="1.8"
-                   stroke-linecap="round" stroke-linejoin="round">
-                <path d="M5 7 H10 M5 12 H10 M5 17 H10"/>
-                <path d="M14 7 L16 9 L20 5"/>
-                <path d="M14 12 L16 14 L20 10"/>
-                <path d="M14 17 L16 19 L20 15"/>
-              </svg>
-            </div>
-            <div class="kind-body">
-              <div class="kind-name">To-do</div>
-              <div class="kind-desc">Checklist with items you can tick off</div>
-            </div>
-          </button>
-
-          <button class="kind-card" on:click={() => createOfKind('list', 'bucket')}>
-            <div class="kind-icon list">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
-                   stroke="currentColor" stroke-width="1.8"
-                   stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 3 L14.6 8.6 L20.8 9.3 L16.2 13.4 L17.4 19.4 L12 16.4 L6.6 19.4 L7.8 13.4 L3.2 9.3 L9.4 8.6 Z"/>
-              </svg>
-            </div>
-            <div class="kind-body">
-              <div class="kind-name">Bucket list</div>
-              <div class="kind-desc">Things to do someday, no pressure</div>
-            </div>
-          </button>
-        </div>
-
-        <button class="cancel-btn" on:click={() => (kindPickerOpen = false)}>Cancel</button>
+  {#if activeSharedToken}
+    <!-- ══════════════ SHARED LIST VIEW ══════════════ -->
+    <SharedListView
+      token={activeSharedToken}
+      on:back={closeShared}
+      on:deleted={closeShared}
+    />
+  {:else}
+    {#key view}
+      <div in:fade={{ duration: 160 }}>
+        {#if view === 'list'}
+          <NotesList
+            {notes}
+            {loading}
+            {trashCount}
+            on:open={(e) => openNote(e.detail)}
+            on:create={handleCreate}
+            on:delete={(e) => handleDelete(e.detail)}
+            on:settings={() => (view = 'settings')}
+            on:open-trash={openTrash}
+            on:open-shared={(e) => handleOpenShared(e.detail)}
+            on:new-shared={handleNewShared}
+          />
+        {:else if view === 'edit' && currentNote}
+          <Editor
+            note={currentNote}
+            on:back={handleEditorBack}
+            on:saved={handleSaved}
+          />
+        {:else if view === 'trash'}
+          <TrashView
+            notes={trashNotes}
+            loading={trashLoading}
+            on:back={trashBack}
+            on:restore={(e) => handleRestore(e.detail)}
+            on:purge={(e) => handlePurge(e.detail)}
+            on:empty={handleEmptyTrash}
+          />
+        {:else if view === 'settings'}
+          <SettingsView
+            on:back={settingsBack}
+            on:open-trash={openTrash}
+            on:imported={handleImported}
+            on:open-sync={handleOpenSync}
+            on:sync-now={handleSyncNow}
+            on:unlock-biometric={handleBiometricUnlock}
+            on:sign-out={handleSignOut}
+            on:sign-out-clear={handleSignOutClear}
+          />
+        {/if}
       </div>
-    </div>
-  {/if}
+    {/key}
 
-  <!-- ══════════════ COMMAND PALETTE ══════════════ -->
-  {#if commandPaletteOpen}
-    <CommandPalette
-      {notes}
-      on:close={() => (commandPaletteOpen = false)}
-      on:command={handleCommand}
-    />
-  {/if}
+    <!-- ══════════════ PERSONAL NOTE KIND PICKER ══════════════ -->
+    {#if kindPickerOpen}
+      <div class="overlay" on:click={() => (kindPickerOpen = false)} on:keydown role="presentation">
+        <div class="sheet" on:click|stopPropagation on:keydown role="dialog" aria-modal="true">
+          <div class="grabber"></div>
+          <h3 class="sheet-title">What kind of note?</h3>
+          <p class="sheet-text">Pick a starting point.</p>
 
-  <!-- ══════════════ SIGN-IN FLOW ══════════════ -->
-  {#if showSignInFlow}
-    <SignInFlow
-      on:complete={() => (showSignInFlow = false)}
-      on:close={() => (showSignInFlow = false)}
-    />
-  {/if}
+          <div class="kinds">
+            <button class="kind-card" on:click={() => createOfKind('doc')}>
+              <div class="kind-icon doc">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+                     stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 3.5 H15 L19 7.5 V20.5 H6 Z"/>
+                  <path d="M15 3.5 V7.5 H19"/>
+                  <path d="M9 12 H15 M9 15.5 H15 M9 19 H12"/>
+                </svg>
+              </div>
+              <div class="kind-body">
+                <div class="kind-name">Note</div>
+                <div class="kind-desc">Free-form writing, markdown-friendly</div>
+              </div>
+            </button>
 
-  <!-- ══════════════ INSTALL BANNER ══════════════ -->
-  <InstallBanner />
+            <button class="kind-card" on:click={() => createOfKind('list', 'todo')}>
+              <div class="kind-icon list">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+                     stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M5 7 H10 M5 12 H10 M5 17 H10"/>
+                  <path d="M14 7 L16 9 L20 5"/>
+                  <path d="M14 12 L16 14 L20 10"/>
+                  <path d="M14 17 L16 19 L20 15"/>
+                </svg>
+              </div>
+              <div class="kind-body">
+                <div class="kind-name">To-do</div>
+                <div class="kind-desc">Private checklist, only on your devices</div>
+              </div>
+            </button>
+
+            <button class="kind-card" on:click={() => createOfKind('list', 'bucket')}>
+              <div class="kind-icon list">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+                     stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 3 L14.6 8.6 L20.8 9.3 L16.2 13.4 L17.4 19.4 L12 16.4 L6.6 19.4 L7.8 13.4 L3.2 9.3 L9.4 8.6 Z"/>
+                </svg>
+              </div>
+              <div class="kind-body">
+                <div class="kind-name">Bucket list</div>
+                <div class="kind-desc">Your personal someday list</div>
+              </div>
+            </button>
+          </div>
+
+          <button class="cancel-btn" on:click={() => (kindPickerOpen = false)}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- ══════════════ NEW SHARED LIST KIND PICKER ══════════════ -->
+    {#if newSharedKindPickerOpen}
+      <div class="overlay" on:click={() => (newSharedKindPickerOpen = false)} on:keydown role="presentation">
+        <div class="sheet" on:click|stopPropagation on:keydown role="dialog" aria-modal="true">
+          <div class="grabber"></div>
+          <h3 class="sheet-title">New shared list</h3>
+          <p class="sheet-text">
+            Anyone with the link can edit it with you — live, from their own phone.
+          </p>
+
+          <div class="kinds">
+            <button class="kind-card" on:click={() => createNewShared('list', 'todo')}>
+              <div class="kind-icon list">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+                     stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M5 7 H10 M5 12 H10 M5 17 H10"/>
+                  <path d="M14 7 L16 9 L20 5"/>
+                  <path d="M14 12 L16 14 L20 10"/>
+                </svg>
+              </div>
+              <div class="kind-body">
+                <div class="kind-name">To-do list</div>
+                <div class="kind-desc">Things to get done, together</div>
+              </div>
+            </button>
+
+            <button class="kind-card" on:click={() => createNewShared('list', 'bucket')}>
+              <div class="kind-icon list">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+                     stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 3 L14.6 8.6 L20.8 9.3 L16.2 13.4 L17.4 19.4 L12 16.4 L6.6 19.4 L7.8 13.4 L3.2 9.3 L9.4 8.6 Z"/>
+                </svg>
+              </div>
+              <div class="kind-body">
+                <div class="kind-name">Bucket list</div>
+                <div class="kind-desc">Adventures you want to have together</div>
+              </div>
+            </button>
+
+            <button class="kind-card" on:click={() => createNewShared('list', 'shopping')}>
+              <div class="kind-icon list">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+                     stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="9" cy="20" r="1.5"/>
+                  <circle cx="18" cy="20" r="1.5"/>
+                  <path d="M3 4 H6 L8 16 H19 L21 7 H6"/>
+                </svg>
+              </div>
+              <div class="kind-body">
+                <div class="kind-name">Shopping list</div>
+                <div class="kind-desc">Pick things up together, in real time</div>
+              </div>
+            </button>
+
+            <button class="kind-card" on:click={() => createNewShared('list', 'checklist')}>
+              <div class="kind-icon list">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+                     stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="4" y="4" width="16" height="16" rx="3"/>
+                  <path d="M8 12 L11 15 L16 9"/>
+                </svg>
+              </div>
+              <div class="kind-body">
+                <div class="kind-name">Checklist</div>
+                <div class="kind-desc">Simple yes/no items</div>
+              </div>
+            </button>
+          </div>
+
+          <button class="cancel-btn" on:click={() => (newSharedKindPickerOpen = false)}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- ══════════════ COMMAND PALETTE ══════════════ -->
+    {#if commandPaletteOpen}
+      <CommandPalette
+        {notes}
+        on:close={() => (commandPaletteOpen = false)}
+        on:command={handleCommand}
+      />
+    {/if}
+
+    <!-- ══════════════ SIGN-IN FLOW ══════════════ -->
+    {#if showSignInFlow}
+      <SignInFlow
+        on:complete={() => (showSignInFlow = false)}
+        on:close={() => (showSignInFlow = false)}
+      />
+    {/if}
+
+    <!-- ══════════════ INSTALL BANNER ══════════════ -->
+    <InstallBanner />
+  {/if}
 </div>
 
 <style>
@@ -535,6 +708,7 @@
     transition: background-color .25s var(--ease), color .25s var(--ease);
   }
 
+  /* ══════════════ KIND PICKER ══════════════ */
   .overlay {
     position: fixed;
     inset: 0;
@@ -582,6 +756,7 @@
   .sheet-text {
     margin: 0 0 18px;
     font-size: 13px;
+    line-height: 1.55;
     color: var(--ink-2);
   }
 
@@ -657,7 +832,7 @@
     .overlay { align-items: center; }
     .sheet {
       border-radius: 24px;
-      max-width: 380px;
+      max-width: 400px;
       padding: 24px 24px 20px;
     }
   }

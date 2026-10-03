@@ -1,6 +1,8 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
   import SwipeRow from './SwipeRow.svelte';
+  import { listRememberedShared } from '../lib/shared-store.js';
+  import { authUser } from '../lib/auth.js';
   import { prefs } from '../lib/prefs.js';
   import {
     deriveDisplayTitle,
@@ -156,6 +158,16 @@
     userChoseSort = true;
     sortMenuOpen = false;
   }
+
+   $: rememberedShared = listRememberedShared();
+
+  function openShared(token) {
+    dispatch('open-shared', token);
+  }
+
+  function newSharedList() {
+    dispatch('new-shared');
+  }
 </script>
 
 <div class="list">
@@ -172,24 +184,48 @@
         {/if}
       </p>
     </div>
-    <div class="head-actions">
-      <button class="icon-action" on:click={() => dispatch('settings')} aria-label="Settings">
+        <div class="head-actions">
+      <button class="icon-action" on:click={newSharedList} aria-label="New shared list" title="New shared list">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
              stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="3.2"/>
-          <path d="M19.4 15 A1.65 1.65 0 0 0 19.8 16.8 L19.9 16.9 A2 2 0 1 1 17 19.8 L16.9 19.7 A1.65 1.65 0 0 0 15.1 19.3 A1.65 1.65 0 0 0 14.2 20.8 V21 A2 2 0 1 1 10.2 21 V20.9 A1.65 1.65 0 0 0 9.3 19.4 A1.65 1.65 0 0 0 7.5 19.8 L7.4 19.9 A2 2 0 1 1 4.5 17 L4.6 16.9 A1.65 1.65 0 0 0 5 15.1 A1.65 1.65 0 0 0 3.5 14.2 H3.3 A2 2 0 1 1 3.3 10.2 H3.4 A1.65 1.65 0 0 0 4.9 9.3 A1.65 1.65 0 0 0 4.5 7.5 L4.4 7.4 A2 2 0 1 1 7.3 4.5 L7.4 4.6 A1.65 1.65 0 0 0 9.2 5 H9.3 A1.65 1.65 0 0 0 10.2 3.5 V3.3 A2 2 0 1 1 14.2 3.3 V3.4 A1.65 1.65 0 0 0 15.1 4.9 A1.65 1.65 0 0 0 16.9 4.5 L17 4.4 A2 2 0 1 1 19.9 7.3 L19.8 7.4 A1.65 1.65 0 0 0 19.4 9.2 V9.3 A1.65 1.65 0 0 0 20.9 10.2 H21.1 A2 2 0 1 1 21.1 14.2 H21 A1.65 1.65 0 0 0 19.4 15 Z"/>
+          <circle cx="9" cy="8" r="3.2"/>
+          <path d="M3 20 C3 16.5 5.7 14 9 14 C12.3 14 15 16.5 15 20"/>
+          <path d="M18 8 V14 M15 11 H21"/>
         </svg>
       </button>
-
-      <button class="new-btn" on:click={() => dispatch('create')} aria-label="New note">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 5 V19 M5 12 H19"/>
-        </svg>
+      <button class="icon-action" on:click={() => dispatch('settings')} aria-label="Settings">
       </button>
-    </div>
   </header>
-
+  <!-- ══════════════ SHARED LISTS ══════════════ -->
+  {#if $authUser && rememberedShared.length > 0}
+    <div class="shared-section">
+      <div class="shared-head">
+        <span class="shared-title">Shared with you</span>
+        <span class="shared-count">{rememberedShared.length}</span>
+      </div>
+      <div class="shared-scroll">
+        {#each rememberedShared as item (item.token)}
+          <button class="shared-card" on:click={() => openShared(item.token)}>
+            <div class="shared-card-icon">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                   stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 7 H10 M5 12 H10 M5 17 H10"/>
+                <path d="M14 7 L16 9 L20 5"/>
+                <path d="M14 12 L16 14 L20 10"/>
+                <path d="M14 17 L16 19 L20 15"/>
+              </svg>
+            </div>
+            <div class="shared-card-body">
+              <div class="shared-card-title">{item.title || 'Untitled list'}</div>
+              <div class="shared-card-sub">
+                {item.role === 'owner' ? 'Owned by you' : 'Shared with you'}
+              </div>
+            </div>
+          </button>
+        {/each}
+      </div>
+    </div>
+  {/if}
   <!-- ══════════════ SEARCH + SORT ══════════════ -->
   {#if hasAnyNotes}
     <div class="search-row">
@@ -945,5 +981,86 @@
       animation: none;
       transition: none;
     }
+  }
+    /* ── Shared section ── */
+  .shared-section {
+    margin-bottom: 22px;
+  }
+  .shared-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 4px;
+    margin-bottom: 10px;
+  }
+  .shared-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-3);
+  }
+  .shared-count {
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--paper-2);
+    color: var(--ink-3);
+  }
+  .shared-scroll {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding: 2px 4px 8px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .shared-scroll::-webkit-scrollbar { display: none; }
+  .shared-card {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 220px;
+    max-width: 260px;
+    padding: 12px 14px;
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: transform .15s var(--ease), border-color .15s var(--ease), box-shadow .15s var(--ease);
+  }
+  .shared-card:hover {
+    transform: translateY(-1px);
+    border-color: var(--hairline-2);
+    box-shadow: var(--shadow-2);
+  }
+  .shared-card-icon {
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 10px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+  .shared-card-body { min-width: 0; flex: 1; }
+  .shared-card-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .shared-card-sub {
+    font-size: 11px;
+    color: var(--ink-3);
+    margin-top: 2px;
+    letter-spacing: -0.005em;
   }
 </style>

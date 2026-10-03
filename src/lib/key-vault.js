@@ -21,6 +21,84 @@ function getDB() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// DEVICE KEY — auto-unlock on this device
+// ═══════════════════════════════════════════════════════════
+//
+// The sync key is stored in IndexedDB as a NON-EXTRACTABLE CryptoKey.
+// The browser keeps the key material opaque: page code can use it to
+// encrypt/decrypt but can never read the raw bytes back out.
+//
+// Notes are already stored in plaintext in this same browser profile
+// (see db.js), so this does not lower local security. It only removes
+// the need to retype the recovery phrase on every launch.
+//
+// The key is deleted on sign-out (see auth.js → signOutNow).
+
+const DK_DB_NAME = 'mote-device-keys';
+const DK_STORE = 'keys';
+
+let dkPromise = null;
+
+function getDeviceKeyDB() {
+  if (!dkPromise) {
+    dkPromise = openDB(DK_DB_NAME, 1, {
+      upgrade(db) {
+        if (!db.objectStoreNames.contains(DK_STORE)) {
+          db.createObjectStore(DK_STORE, { keyPath: 'uid' });
+        }
+      },
+    });
+  }
+  return dkPromise;
+}
+
+async function toNonExtractable(key) {
+  if (!key.extractable) return key;
+  const raw = await crypto.subtle.exportKey('raw', key);
+  return crypto.subtle.importKey(
+    'raw',
+    raw,
+    { name: key.algorithm?.name || 'AES-GCM' },
+    false,
+    key.usages?.length ? key.usages : ['encrypt', 'decrypt']
+  );
+}
+
+export async function saveDeviceKey(uid, key, salt = null) {
+  if (!uid || !key) return;
+  const safeKey = await toNonExtractable(key);
+  const db = await getDeviceKeyDB();
+  await db.put(DK_STORE, { uid, key: safeKey, salt, savedAt: new Date().toISOString() });
+}
+
+/** Returns { key, salt } or null. Never prompts. */
+export async function loadDeviceKey(uid) {
+  if (!uid) return null;
+  try {
+    const db = await getDeviceKeyDB();
+    const rec = await db.get(DK_STORE, uid);
+    return rec?.key ? { key: rec.key, salt: rec.salt || null } : null;
+  } catch (err) {
+    console.warn('[vault] loadDeviceKey failed:', err);
+    return null;
+  }
+}
+
+export async function deleteDeviceKey(uid) {
+  try {
+    const db = await getDeviceKeyDB();
+    await db.delete(DK_STORE, uid);
+  } catch {}
+}
+
+export async function clearAllDeviceKeys() {
+  try {
+    const db = await getDeviceKeyDB();
+    await db.clear(DK_STORE);
+  } catch {}
+}
+
+// ═══════════════════════════════════════════════════════════
 // WEBAUTHN
 // ═══════════════════════════════════════════════════════════
 

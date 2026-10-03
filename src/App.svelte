@@ -21,7 +21,6 @@
     purgeNote,
     emptyTrash,
     wipeAll,
-    onNoteSaved,
   } from './lib/db.js';
 
   import { createNote } from './lib/notes.js';
@@ -30,13 +29,13 @@
   import {
     initAuth,
     authUser,
+    authReady,
     completeEmailLinkSignIn,
     completeRedirectSignIn,
     signOutNow,
   } from './lib/auth.js';
 
   import {
-    syncKey,
     clearSyncKey,
     setBiometricAvailable,
     setSyncKey,
@@ -47,12 +46,11 @@
     unlockWithBiometric,
   } from './lib/key-vault.js';
 
+  // Key restore, the initial sync, the realtime listener and pushing local
+  // edits all live in sync-store.js now. App only needs to react to results.
   import {
-    syncStatus,
+    notesVersion,
     runFullSync,
-    queueNotePush,
-    startPeriodicSync,
-    stopPeriodicSync,
     handleOnline,
     handleOffline,
     resetSyncState,
@@ -84,20 +82,90 @@
   let newSharedKindPickerOpen = false;
 
   let untagSystemTheme = null;
-  let unsubscribeSave = null;
-  let unsubscribeSyncKey = null;
-  let initialSyncRan = false;
+
+  // ═══════════════════════════════════════════════════════════
+  // NAVIGATION (hooked into browser history so the Android back
+  // button and the iOS swipe-back gesture go up a level instead of
+  // closing the app)
+  // ═══════════════════════════════════════════════════════════
+  function go(next) {
+    if (view === next) return;
+    window.history.pushState({ mote: next }, '');
+    view = next;
+  }
+
+  function goBack() {
+    if (window.history.state?.mote) {
+      window.history.back(); // onPopState does the rest
+    } else {
+      showList();
+    }
+  }
+
+  async function showList() {
+    view = 'list';
+    currentNote = null;
+    await refreshList(true);
+  }
+
+  function onPopState(e) {
+    const token = getSharedTokenFromPath();
+    activeSharedToken = token;
+    if (token) return;
+
+    let target = e.state?.mote || 'list';
+    if (target === 'edit' && !currentNote) target = 'list';
+    view = target;
+
+    if (target === 'list') {
+      currentNote = null;
+      refreshList(true);
+    } else if (target === 'trash') {
+      refreshTrash();
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════
   // BOOT
   // ═══════════════════════════════════════════════════════════
+  function waitForAuthReady(timeoutMs = 5000) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      const unsub = authReady.subscribe((ready) => {
+        if (ready) {
+          finish();
+          Promise.resolve().then(() => unsub());
+        }
+      });
+      setTimeout(() => {
+        finish();
+        unsub();
+      }, timeoutMs);
+    });
+  }
+
   onMount(async () => {
     untagSystemTheme = watchSystemTheme();
     initAuth();
 
+    // After a reload, history may still carry a state from a deeper screen
+    // while the app starts on the list. Reset it so Back behaves.
+    if (window.history.state?.mote) {
+      window.history.replaceState({}, '');
+    }
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('popstate', onPopState);
+
     // ── Process any pending sign-in returns ──────────────────
-    // Email link (from an email) and Google redirect (from OAuth)
-    // are handled in parallel. Only one applies per page load.
+    // Email link (from an email) and Google redirect (from OAuth).
+    // completeRedirectSignIn is shared with initAuth, so this is safe.
     await Promise.all([
       completeEmailLinkSignIn().catch((err) => {
         console.warn('[auth] email link completion failed:', err);
@@ -107,12 +175,10 @@
       }),
     ]);
 
-    // Give onAuthStateChanged a tick to fire so $authUser is settled
-    await new Promise((r) => setTimeout(r, 100));
+    // Wait for $authUser to settle instead of guessing with a timer
+    await waitForAuthReady();
 
     // ── Recover mid-sign-in state across the redirect ────────
-    // If we set the "signin pending" flag before the redirect,
-    // reopen the flow now that we're back.
     const wasSigningIn = localStorage.getItem(SIGNIN_PENDING_KEY) === '1';
     if (wasSigningIn) {
       localStorage.removeItem(SIGNIN_PENDING_KEY);
@@ -125,29 +191,6 @@
     // ── Load personal data ───────────────────────────────────
     await refreshList();
 
-    // ── Sync wiring ──────────────────────────────────────────
-    unsubscribeSave = onNoteSaved((note) => {
-      queueNotePush(note.id);
-    });
-
-    unsubscribeSyncKey = syncKey.subscribe((s) => {
-      if (!s.locked && s.key && $authUser && !initialSyncRan) {
-        initialSyncRan = true;
-        runFullSync().catch((err) => {
-          console.warn('[sync] initial sync failed:', err);
-        });
-      }
-      if (s.locked) {
-        initialSyncRan = false;
-      }
-    });
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    window.addEventListener('popstate', onPopState);
-
-    startPeriodicSync();
-
     // ── PWA share target + shortcut actions ──────────────────
     const shared = await handleSharePayload();
     if (shared) return;
@@ -157,17 +200,22 @@
 
   onDestroy(() => {
     if (untagSystemTheme) untagSystemTheme();
-    if (unsubscribeSave) unsubscribeSave();
-    if (unsubscribeSyncKey) unsubscribeSyncKey();
-    stopPeriodicSync();
     window.removeEventListener('online', handleOnline);
     window.removeEventListener('offline', handleOffline);
     window.removeEventListener('popstate', onPopState);
   });
 
-  function onPopState() {
-    activeSharedToken = getSharedTokenFromPath();
+  // ═══════════════════════════════════════════════════════════
+  // REMOTE CHANGES (realtime sync from other devices)
+  // ═══════════════════════════════════════════════════════════
+  // Sync wrote notes into IndexedDB. Reload quietly, with no spinner,
+  // so the list updates in place.
+  async function onRemoteChange() {
+    await refreshList(true);
+    if (view === 'trash') await refreshTrash();
   }
+
+  $: if ($notesVersion > 0) onRemoteChange();
 
   // ═══════════════════════════════════════════════════════════
   // RECOVER FROM A SIGN-IN REDIRECT
@@ -192,8 +240,8 @@
         // resolve to the setup-phrase or enter-phrase screen.
         showSignInFlow = true;
       }
-      // If onboarding is complete, nothing to do — user is signed
-      // in and sync will run once the vault unlocks.
+      // If onboarding is complete, nothing to do — the saved device key
+      // unlocks sync automatically, or the user is asked for the phrase.
     } catch (err) {
       console.error('[auth] recover sign-in failed:', err);
       showSignInFlow = true;
@@ -228,7 +276,7 @@
 
     if (e.key === ',') {
       e.preventDefault();
-      if (view !== 'settings') view = 'settings';
+      go('settings');
       return;
     }
 
@@ -241,8 +289,9 @@
   // ═══════════════════════════════════════════════════════════
   // DATA
   // ═══════════════════════════════════════════════════════════
-  async function refreshList() {
-    loading = true;
+  // silent = true skips the loading spinner (used for background refreshes)
+  async function refreshList(silent = false) {
+    if (!silent) loading = true;
     try {
       notes = await listActiveNotes();
       const trashed = await listTrashNotes();
@@ -293,9 +342,9 @@
       fresh.body = body;
       fresh.title = (title || body.split('\n')[0]).slice(0, 80);
       await putNote(fresh);
-      currentNote = fresh;
-      view = 'edit';
       window.history.replaceState({}, '', '/');
+      currentNote = fresh;
+      go('edit');
       return true;
     } catch (err) {
       console.error('[share] failed:', err);
@@ -321,7 +370,7 @@
     const note = await getNote(id);
     if (!note) return;
     currentNote = note;
-    view = 'edit';
+    go('edit');
   }
 
   function handleCreate() {
@@ -333,24 +382,22 @@
     const fresh = createNote({ kind, listStyle });
     await putNote(fresh);
     currentNote = fresh;
-    view = 'edit';
+    go('edit');
   }
 
   async function handleDelete(id) {
     await softDeleteNote(id);
-    await refreshList();
+    await refreshList(true);
   }
 
-  async function handleEditorBack() {
-    view = 'list';
-    currentNote = null;
-    await refreshList();
+  function handleEditorBack() {
+    goBack();
   }
 
   function handleSaved() {}
 
   async function handleImported() {
-    await refreshList();
+    await refreshList(true);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -358,7 +405,7 @@
   // ═══════════════════════════════════════════════════════════
   function handleOpenShared(token) {
     activeSharedToken = token;
-    window.history.pushState({}, '', `/s/${token}`);
+    window.history.pushState({ shared: true }, '', `/s/${token}`);
   }
 
   function handleNewShared() {
@@ -374,7 +421,7 @@
     try {
       const { token } = await createSharedList({ listStyle, title: '' });
       activeSharedToken = token;
-      window.history.pushState({}, '', `/s/${token}`);
+      window.history.pushState({ shared: true }, '', `/s/${token}`);
     } catch (err) {
       console.error('[shared] create failed:', err);
       alert(err.message || 'Could not create shared list.');
@@ -382,23 +429,28 @@
   }
 
   function closeShared() {
-    activeSharedToken = null;
-    window.history.pushState({}, '', '/');
-    refreshList();
+    if (window.history.state?.shared) {
+      window.history.back(); // onPopState clears the token and refreshes
+    } else {
+      // Opened straight from a link: there is no earlier entry to go back to
+      window.history.replaceState({}, '', '/');
+      activeSharedToken = null;
+      refreshList(true);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
   // TRASH
   // ═══════════════════════════════════════════════════════════
   async function openTrash() {
-    view = 'trash';
+    go('trash');
     await refreshTrash();
   }
 
   async function handleRestore(id) {
     await restoreNote(id);
     await refreshTrash();
-    await refreshList();
+    await refreshList(true);
   }
 
   async function handlePurge(id) {
@@ -422,7 +474,7 @@
     else if (cmd === 'new-todo') createOfKind('list', 'todo');
     else if (cmd === 'new-bucket') createOfKind('list', 'bucket');
     else if (cmd === 'open-trash') openTrash();
-    else if (cmd === 'open-settings') (view = 'settings');
+    else if (cmd === 'open-settings') go('settings');
     else if (cmd === 'toggle-theme') {
       const next = $prefs.theme === 'dark' ? 'light' : 'dark';
       setPref('theme', next);
@@ -441,7 +493,7 @@
   async function handleSyncNow() {
     try {
       await runFullSync();
-      await refreshList();
+      await refreshList(true);
     } catch (err) {
       console.error('[sync] manual sync failed:', err);
     }
@@ -466,7 +518,6 @@
   async function handleSignOut() {
     clearSyncKey();
     resetSyncState();
-    initialSyncRan = false;
     await signOutNow();
   }
 
@@ -478,31 +529,19 @@
     if (!ok) return;
 
     try {
-      await wipeAll();
+      // Stop sync first so the live listener can't write notes back
+      // while the local database is being wiped.
       clearSyncKey();
       resetSyncState();
-      initialSyncRan = false;
+      await wipeAll();
       await signOutNow();
       currentNote = null;
       view = 'list';
-      await refreshList();
+      await refreshList(true);
     } catch (err) {
       console.error('[sign out clear] failed:', err);
       alert('Something went wrong clearing local data.');
     }
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // BACK HANDLERS
-  // ═══════════════════════════════════════════════════════════
-  async function settingsBack() {
-    view = 'list';
-    await refreshList();
-  }
-
-  async function trashBack() {
-    view = 'list';
-    await refreshList();
   }
 </script>
 
@@ -527,7 +566,7 @@
             on:open={(e) => openNote(e.detail)}
             on:create={handleCreate}
             on:delete={(e) => handleDelete(e.detail)}
-            on:settings={() => (view = 'settings')}
+            on:settings={() => go('settings')}
             on:open-trash={openTrash}
             on:open-shared={(e) => handleOpenShared(e.detail)}
             on:new-shared={handleNewShared}
@@ -542,14 +581,14 @@
           <TrashView
             notes={trashNotes}
             loading={trashLoading}
-            on:back={trashBack}
+            on:back={goBack}
             on:restore={(e) => handleRestore(e.detail)}
             on:purge={(e) => handlePurge(e.detail)}
             on:empty={handleEmptyTrash}
           />
         {:else if view === 'settings'}
           <SettingsView
-            on:back={settingsBack}
+            on:back={goBack}
             on:open-trash={openTrash}
             on:imported={handleImported}
             on:open-sync={handleOpenSync}
@@ -727,6 +766,8 @@
 </div>
 
 <style>
+  /* No transform, filter or will-change on this wrapper: the screens inside
+     are position: fixed, and any of those would break them. */
   .mote {
     background: var(--paper);
     color: var(--ink);
@@ -799,6 +840,7 @@
     align-items: center;
     gap: 14px;
     width: 100%;
+    min-height: 64px;
     padding: 14px 16px;
     border: 1px solid var(--hairline);
     border-radius: 16px;
@@ -807,14 +849,18 @@
     font: inherit;
     text-align: left;
     cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
     transition: transform .15s var(--ease), box-shadow .2s var(--ease), border-color .2s var(--ease);
   }
-  .kind-card:hover {
-    transform: translateY(-1px);
-    border-color: var(--hairline-2);
-    box-shadow: var(--shadow-2);
+  .kind-card:active { transform: scale(.985); background: var(--paper-2); }
+  @media (hover: hover) {
+    .kind-card:hover {
+      transform: translateY(-1px);
+      border-color: var(--hairline-2);
+      box-shadow: var(--shadow-2);
+    }
   }
-  .kind-card:active { transform: scale(.985); }
 
   .kind-icon {
     width: 40px;
@@ -843,6 +889,7 @@
 
   .cancel-btn {
     width: 100%;
+    min-height: 46px;
     padding: 12px;
     border: none;
     border-radius: 12px;
@@ -852,6 +899,7 @@
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
+    touch-action: manipulation;
   }
   .cancel-btn:active { transform: scale(.98); }
 

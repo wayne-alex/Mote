@@ -1,9 +1,18 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, browserLocalPersistence, setPersistence } from 'firebase/auth';
+import {
+  getAuth,
+  initializeAuth,
+  indexedDBLocalPersistence,
+  browserLocalPersistence,
+  browserPopupRedirectResolver,
+} from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  // For signInWithRedirect to work on Safari and recent Chrome, this should be
+  // YOUR OWN domain (e.g. "notes.example.com") with /__/auth/* proxied to
+  // <project>.firebaseapp.com. See the setup notes.
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
@@ -12,12 +21,22 @@ const firebaseConfig = {
 };
 
 export const firebaseApp = initializeApp(firebaseConfig);
-export const auth = getAuth(firebaseApp);
-export const db = getFirestore(firebaseApp);
 
-// Keep the user signed in across page loads and browser restarts.
-// This means the encrypted key will persist via the browser session
-// until the user explicitly signs out.
-setPersistence(auth, browserLocalPersistence).catch((err) => {
-  console.warn('[firebase] persistence setup failed:', err);
-});
+// Persistence is set at initialisation instead of with setPersistence().
+// setPersistence() is async and could still be running when a sign-in
+// redirect started, which can lose the session. IndexedDB is tried first,
+// localStorage is the fallback.
+function createAuth() {
+  try {
+    return initializeAuth(firebaseApp, {
+      persistence: [indexedDBLocalPersistence, browserLocalPersistence],
+      popupRedirectResolver: browserPopupRedirectResolver,
+    });
+  } catch {
+    // Already initialised (dev hot reload)
+    return getAuth(firebaseApp);
+  }
+}
+
+export const auth = createAuth();
+export const db = getFirestore(firebaseApp);

@@ -11,6 +11,7 @@ import {
   orderBy,
   serverTimestamp,
   writeBatch,
+  onSnapshot,
 } from 'firebase/firestore';
 import { db as firestore } from './firebase.js';
 import { encryptObject, decryptObject } from './crypto.js';
@@ -165,7 +166,9 @@ export async function reconcile(uid, key) {
   }
 
   for (const [id, remote] of remoteById) {
-    if (!localById.has(id)) toPull.push(remote);
+    // A remote tombstone for a note we don't have locally was purged here
+    // on purpose. Pulling it would bring it back into the trash.
+    if (!localById.has(id) && !remote.deletedAt) toPull.push(remote);
   }
 
   if (toPull.length > 0) {
@@ -255,6 +258,80 @@ export async function incrementalSync(uid, key, sinceIso) {
   }
 
   return result;
+}
+
+// ═══════════════════════════════════════════════════════════
+// REALTIME
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Apply a batch of remote docs to local storage. Only docs that are
+ * newer than the local copy are written. bulkUpsertNotes does not fire
+ * save listeners, so applying remote changes never triggers a push.
+ * Returns how many notes were written.
+ */
+async function applyRemoteDocs(key, remoteDocs) {
+  const decrypted = [];
+
+  for (const remote of remoteDocs) {
+    const local = await getNote(remote.id);
+
+    // Never resurrect a tombstone for a note purged on this device
+    if (!local && remote.deletedAt) continue;
+
+    if (local) {
+      const localTime = Date.parse(local.updatedAt || 0);
+      const remoteTime = Date.parse(remote.updatedAt || 0);
+      if (remoteTime <= localTime) continue;
+    }
+
+    try {
+      const content = await decryptObject(remote.ciphertext, remote.iv, key);
+      decrypted.push(rebuildFromDecryption(content, {
+        updatedAt: remote.updatedAt,
+        deletedAt: remote.deletedAt || null,
+      }));
+    } catch (err) {
+      console.error(`[sync] realtime decrypt failed for ${remote.id}:`, err);
+    }
+  }
+
+  if (decrypted.length > 0) await bulkUpsertNotes(decrypted);
+  return decrypted.length;
+}
+
+/**
+ * Live subscription to users/{uid}/notes. Fires whenever another
+ * device adds or edits a note. Returns an unsubscribe function.
+ *
+ * The first snapshot contains every remote note; applyRemoteDocs skips
+ * anything that is not newer than the local copy, so it is cheap.
+ */
+export function watchRemoteNotes(uid, key, { onApplied, onError } = {}) {
+  let chain = Promise.resolve();
+
+  return onSnapshot(
+    notesCollection(uid),
+    (snap) => {
+      const docs = snap
+        .docChanges()
+        .filter((c) => c.type !== 'removed')
+        // Skip our own writes that have not reached the server yet
+        .filter((c) => !c.doc.metadata.hasPendingWrites)
+        .map((c) => ({ id: c.doc.id, ...c.doc.data() }));
+
+      if (docs.length === 0) return;
+
+      chain = chain
+        .then(() => applyRemoteDocs(key, docs))
+        .then((count) => { if (count > 0) onApplied?.(count); })
+        .catch((err) => console.error('[sync] realtime apply failed:', err));
+    },
+    (err) => {
+      console.error('[sync] realtime listener error:', err);
+      onError?.(err);
+    }
+  );
 }
 
 // ═══════════════════════════════════════════════════════════

@@ -1,5 +1,5 @@
 // src/lib/auth.js
-import { writable, get } from 'svelte/store';
+import { writable } from 'svelte/store';
 import {
   GoogleAuthProvider,
   signInWithPopup,
@@ -12,6 +12,7 @@ import {
   onAuthStateChanged,
 } from 'firebase/auth';
 import { auth } from './firebase.js';
+import { clearAllDeviceKeys } from './key-vault.js';
 
 const EMAIL_LINK_KEY = 'mote:emailForSignIn';
 
@@ -21,18 +22,27 @@ export const authReady = writable(false);
 export const authError = writable(null);
 
 let unsubscribe = null;
+let redirectPromise = null;
 
 /**
  * Start observing auth state. Call once at app boot.
+ *
+ * authReady only becomes true after any pending Google redirect has been
+ * resolved, so the UI never flashes "signed out" while a redirect
+ * sign-in is still being completed.
  */
 export function initAuth() {
   if (unsubscribe) return;
+
+  const redirectDone = completeRedirectSignIn();
+
   unsubscribe = onAuthStateChanged(
     auth,
-    (user) => {
+    async (user) => {
       authUser.set(user);
+      if (user) authError.set(null);
+      await redirectDone;
       authReady.set(true);
-      authError.set(null);
     },
     (err) => {
       console.error('[auth] state error:', err);
@@ -47,13 +57,12 @@ export function initAuth() {
 /**
  * Sign in with Google.
  *
- * In production (HTTPS, non-localhost), we use signInWithRedirect
- * because popups are frequently blocked by browsers and COOP
- * policies. In dev on localhost, we use signInWithPopup because
- * it's faster and localhost doesn't have the same restrictions.
+ * Popup first: it works on every host without extra configuration.
+ * Redirect is only the fallback, for browsers that block popups or
+ * can't open them (for example an installed iOS PWA).
  *
- * Returns the signed-in user, OR null if a redirect was initiated
- * (in which case the page is about to reload).
+ * Returns the signed-in user, or null if a redirect was started (the
+ * page is about to navigate away). Throws if the user cancels.
  */
 export async function signInWithGoogle() {
   authError.set(null);
@@ -61,61 +70,60 @@ export async function signInWithGoogle() {
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: 'select_account' });
 
-  const isLocalhost =
-    typeof window !== 'undefined' &&
-    (window.location.hostname === 'localhost' ||
-     window.location.hostname === '127.0.0.1');
+  try {
+    const result = await signInWithPopup(auth, provider);
+    return result.user;
+  } catch (err) {
+    const code = err?.code || '';
 
-  if (isLocalhost) {
-    try {
-      const result = await signInWithPopup(auth, provider);
-      return result.user;
-    } catch (err) {
-      if (err?.code === 'auth/popup-blocked' ||
-          err?.code === 'auth/popup-closed-by-user') {
+    const shouldRedirect =
+      code === 'auth/popup-blocked' ||
+      code === 'auth/operation-not-supported-in-this-environment';
+
+    if (shouldRedirect) {
+      try {
         localStorage.setItem('mote:signinPending', '1');
         await signInWithRedirect(auth, provider);
         return null;
+      } catch (redirectErr) {
+        localStorage.removeItem('mote:signinPending');
+        console.error('[auth] google redirect failed:', redirectErr);
+        authError.set(friendlyError(redirectErr));
+        throw redirectErr;
       }
-      console.error('[auth] google sign-in failed:', err);
-      authError.set(friendlyError(err));
-      throw err;
     }
-  }
 
-  // Production: always use redirect
-  try {
-    localStorage.setItem('mote:signinPending', '1');
-    await signInWithRedirect(auth, provider);
-    return null;
-  } catch (err) {
-    localStorage.removeItem('mote:signinPending');
-    console.error('[auth] google redirect failed:', err);
+    // Cancelled by the user, network error, unauthorised domain, etc.
+    if (code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request') {
+      console.error('[auth] google sign-in failed:', err);
+    }
     authError.set(friendlyError(err));
     throw err;
   }
 }
 
 /**
- * Called once on app boot. If the page just came back from a
- * Google sign-in redirect, this resolves the result.
- *
- * Returns the signed-in user, or null if there was no redirect
- * to process.
+ * Resolves the result of a Google redirect sign-in, if the page just
+ * came back from one. Safe to call more than once: the work is done
+ * a single time and later calls get the same result.
  */
-export async function completeRedirectSignIn() {
-  try {
-    const result = await getRedirectResult(auth);
-    return result?.user || null;
-  } catch (err) {
-    // A few errors here are expected and harmless:
-    //   - auth/no-auth-event: the user landed on the page normally
-    //   - auth/popup-blocked: transitive from an older attempt
-    if (err?.code === 'auth/no-auth-event') return null;
-    console.error('[auth] redirect completion failed:', err);
-    authError.set(friendlyError(err));
-    return null;
+export function completeRedirectSignIn() {
+  if (!redirectPromise) {
+    redirectPromise = (async () => {
+      try {
+        const result = await getRedirectResult(auth);
+        return result?.user || null;
+      } catch (err) {
+        if (err?.code === 'auth/no-auth-event') return null;
+        console.error('[auth] redirect completion failed:', err);
+        authError.set(friendlyError(err));
+        return null;
+      } finally {
+        localStorage.removeItem('mote:signinPending');
+      }
+    })();
   }
+  return redirectPromise;
 }
 
 // ── Sign in with email link ──────────────────────────────────
@@ -167,6 +175,9 @@ export async function completeEmailLinkSignIn() {
 
 // ── Sign out ─────────────────────────────────────────────────
 export async function signOutNow() {
+  // Forget the auto-unlock key first: signing out means the next
+  // sign-in on this device must supply the recovery phrase again.
+  await clearAllDeviceKeys();
   try {
     await fbSignOut(auth);
   } catch (err) {
